@@ -119,7 +119,7 @@ data class AnalyticsUiState(
 
 class ChessViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val dao = ChessDatabase.getInstance(application).chessDao()
+    private val dao = ChessDatabase.getSafeDao(application)
 
     val preferencesFlow: StateFlow<UserPreferencesEntity> = dao.observePreferences()
         .map { it ?: UserPreferencesEntity() }
@@ -156,16 +156,25 @@ class ChessViewModel(application: Application) : AndroidViewModel(application) {
     private var liveStreamJob: Job? = null
 
     init {
+        com.example.util.AppDiagnosticLogger.ok("ViewModel", "ChessViewModel создан, запуск фоновой инициализации")
         viewModelScope.launch(Dispatchers.IO) {
             runCatching {
                 if (dao.getPreferencesOnce() == null) {
                     dao.savePreferences(UserPreferencesEntity())
                 }
                 seedInitialMasterpieceGamesIfEmpty()
+                com.example.util.AppDiagnosticLogger.ok("ViewModel", "Стартовые партии и настройки загружены")
+            }.onFailure { err ->
+                com.example.util.AppDiagnosticLogger.error("ViewModel", "Ошибка при первичной инициализации данных", err)
             }
-            refreshExplorerAndCloudEval(_arenaState.value.boardState.toFen())
-            loadLichessPlayerAndGames("DrNykterstein")
-            loadCommunityData()
+            runCatching {
+                refreshExplorerAndCloudEval(_arenaState.value.boardState.toFen())
+                loadLichessPlayerAndGames("DrNykterstein")
+                loadCommunityData()
+                com.example.util.AppDiagnosticLogger.ok("LichessAPI", "Фоновая синхронизация с Lichess API запущена")
+            }.onFailure { err ->
+                com.example.util.AppDiagnosticLogger.error("LichessAPI", "Ошибка запуска синхронизации Lichess API", err)
+            }
         }
         startArenaClockTicker()
     }
