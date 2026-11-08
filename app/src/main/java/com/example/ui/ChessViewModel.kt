@@ -28,6 +28,7 @@ import com.example.data.remote.OpeningExplorerResult
 import com.example.ui.theme.AppUiTheme
 import com.example.ui.theme.BoardSkin
 import com.example.ui.theme.PieceStyle
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -38,6 +39,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 enum class PlayMode(val labelRu: String) {
     ONLINE_LICHESS("Онлайн Lichess"),
@@ -154,11 +156,13 @@ class ChessViewModel(application: Application) : AndroidViewModel(application) {
     private var liveStreamJob: Job? = null
 
     init {
-        viewModelScope.launch {
-            if (dao.getPreferencesOnce() == null) {
-                dao.savePreferences(UserPreferencesEntity())
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                if (dao.getPreferencesOnce() == null) {
+                    dao.savePreferences(UserPreferencesEntity())
+                }
+                seedInitialMasterpieceGamesIfEmpty()
             }
-            seedInitialMasterpieceGamesIfEmpty()
             refreshExplorerAndCloudEval(_arenaState.value.boardState.toFen())
             loadLichessPlayerAndGames("DrNykterstein")
             loadCommunityData()
@@ -436,10 +440,13 @@ class ChessViewModel(application: Application) : AndroidViewModel(application) {
 
         if (shouldAiReply) {
             viewModelScope.launch {
-                delay(420L)
+                delay(380L)
                 val currentBoard = _arenaState.value.boardState
                 if (currentBoard.activeColor == PieceColor.BLACK && _arenaState.value.isGameActive) {
-                    val (aiMove, _) = ChessEngine.findBestMove(currentBoard, level = _arenaState.value.aiLevel)
+                    val aiLevel = _arenaState.value.aiLevel
+                    val (aiMove, _) = withContext(Dispatchers.Default) {
+                        ChessEngine.findBestMove(currentBoard, level = aiLevel)
+                    }
                     if (aiMove != null) {
                         executeMoveOnArena(aiMove)
                     }
@@ -454,14 +461,18 @@ class ChessViewModel(application: Application) : AndroidViewModel(application) {
 
     fun requestEngineHintOnArena() {
         val current = _arenaState.value.boardState
-        val (best, eval) = ChessEngine.findBestMove(current, level = 6)
-        if (best != null) {
-            _arenaState.update {
-                it.copy(
-                    bestMoveHintUci = best.toUci(),
-                    evalCentipawns = eval,
-                    statusBanner = "Рекомендация Stockfish: ${best.san} (${GameAnalyticsEngine.formatEval(eval)})"
-                )
+        viewModelScope.launch {
+            val (best, eval) = withContext(Dispatchers.Default) {
+                ChessEngine.findBestMove(current, level = 5)
+            }
+            if (best != null) {
+                _arenaState.update {
+                    it.copy(
+                        bestMoveHintUci = best.toUci(),
+                        evalCentipawns = eval,
+                        statusBanner = "Рекомендация Stockfish: ${best.san} (${GameAnalyticsEngine.formatEval(eval)})"
+                    )
+                }
             }
         }
     }
@@ -781,7 +792,7 @@ class ChessViewModel(application: Application) : AndroidViewModel(application) {
         _analyticsState.update {
             it.copy(isLoading = true, searchedUsername = clean, statusMessage = "Синхронизация профиля и партий $clean с Lichess.org...")
         }
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             LichessApiClient.fetchUserProfile(clean, prefs.lichessApiToken).onSuccess { profile ->
                 _analyticsState.update { it.copy(userProfile = profile) }
             }
@@ -791,14 +802,16 @@ class ChessViewModel(application: Application) : AndroidViewModel(application) {
             LichessApiClient.fetchUserGamesNdjson(clean, maxGames = 10, token = prefs.lichessApiToken)
                 .onSuccess { games ->
                     if (games.isNotEmpty()) {
-                        val enriched = games.map { g ->
-                            val rep = computeReportForSavedGame(g)
-                            g.copy(
-                                whiteAccuracy = rep.whiteSummary.overallAccuracy,
-                                blackAccuracy = rep.blackSummary.overallAccuracy,
-                                blundersCount = (rep.whiteSummary.counts[MoveClassification.BLUNDER] ?: 0) +
-                                    (rep.blackSummary.counts[MoveClassification.BLUNDER] ?: 0)
-                            )
+                        val enriched = withContext(Dispatchers.Default) {
+                            games.map { g ->
+                                val rep = computeReportForSavedGame(g)
+                                g.copy(
+                                    whiteAccuracy = rep.whiteSummary.overallAccuracy,
+                                    blackAccuracy = rep.blackSummary.overallAccuracy,
+                                    blundersCount = (rep.whiteSummary.counts[MoveClassification.BLUNDER] ?: 0) +
+                                        (rep.blackSummary.counts[MoveClassification.BLUNDER] ?: 0)
+                                )
+                            }
                         }
                         dao.insertGames(enriched)
                         selectGameForReview(enriched.first())
@@ -819,7 +832,7 @@ class ChessViewModel(application: Application) : AndroidViewModel(application) {
     fun updateCrosstableOpponent(opponent: String) {
         val currentPlayer = _analyticsState.value.searchedUsername
         _analyticsState.update { it.copy(opponentForCrosstable = opponent) }
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             LichessApiClient.fetchCrosstable(currentPlayer, opponent).onSuccess { summary ->
                 _analyticsState.update { it.copy(crosstableSummary = summary) }
             }
@@ -847,23 +860,25 @@ class ChessViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun selectGameForReview(game: SavedGameEntity) {
-        val report = computeReportForSavedGame(game)
-        val initialIdx = (report.plies.size - 1).coerceAtLeast(0)
-        _analyticsState.update {
-            it.copy(
-                activeReviewReport = report,
-                currentReviewPlyIndex = initialIdx,
-                retryMistakeMode = false,
-                retryFeedbackText = null,
-                retrySelectedSquare = null,
-                retryBoardState = null
-            )
+        viewModelScope.launch(Dispatchers.Default) {
+            val report = computeReportForSavedGame(game)
+            val initialIdx = (report.plies.size - 1).coerceAtLeast(0)
+            _analyticsState.update {
+                it.copy(
+                    activeReviewReport = report,
+                    currentReviewPlyIndex = initialIdx,
+                    retryMistakeMode = false,
+                    retryFeedbackText = null,
+                    retrySelectedSquare = null,
+                    retryBoardState = null
+                )
+            }
         }
     }
 
     fun importCustomPgnForReview(pgnOrMoves: String) {
         if (pgnOrMoves.isBlank()) return
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.Default) {
             val cleanMoves = pgnOrMoves.lines()
                 .filterNot { it.trim().startsWith("[") }
                 .joinToString(" ")

@@ -141,8 +141,6 @@ object GameAnalyticsEngine {
             val color = board.activeColor
             val moveNum = (idx / 2) + 1
 
-            // Best move from local engine if needed
-            val (engineBestMove, localBestEval) = ChessEngine.findBestMove(board, level = 4)
             val nextBoard = ChessEngine.applyMoveUnchecked(board, move)
             val fenAfter = nextBoard.toFen()
 
@@ -163,6 +161,13 @@ object GameAnalyticsEngine {
             val winLoss = max(0.0, winBefore - winAfter)
             val acc = calculateMoveAccuracy(winBefore, winAfter)
 
+            // Only run tactical search when the played move lost win probability
+            val engineBestMove = if (winLoss >= 4.0) {
+                ChessEngine.findBestMove(board, level = 2).first
+            } else {
+                move
+            }
+
             val totalNonKingPieces = nextBoard.squares.values.count { it.type != PieceType.KING }
             val phase = when {
                 idx < 14 -> GamePhase.OPENING
@@ -173,10 +178,10 @@ object GameAnalyticsEngine {
             val isSacrificeOrSharp = move.isCapture && (winAfter >= winBefore - 1.5) && idx >= 10 && abs(evalAfterWhiteCp) > 120
             val classification = when {
                 idx < 6 && winLoss < 3.5 -> MoveClassification.BOOK
-                isSacrificeOrSharp && winLoss < 1.2 && move.toUci() == engineBestMove?.toUci() -> MoveClassification.BRILLIANT
-                winLoss < 1.2 && move.toUci() == engineBestMove?.toUci() -> MoveClassification.BEST
-                winLoss < 2.2 -> MoveClassification.GREAT
-                winLoss < 6.0 -> MoveClassification.GOOD
+                isSacrificeOrSharp && winLoss < 1.2 -> MoveClassification.BRILLIANT
+                winLoss < 1.5 -> MoveClassification.BEST
+                winLoss < 3.2 -> MoveClassification.GREAT
+                winLoss < 6.5 -> MoveClassification.GOOD
                 winLoss < 12.5 -> MoveClassification.INACCURACY
                 winLoss < 22.0 -> MoveClassification.MISTAKE
                 else -> MoveClassification.BLUNDER
@@ -188,10 +193,9 @@ object GameAnalyticsEngine {
             val timeSpentSec = if (currentClockCentis != null && prevSameColorClockCentis != null) {
                 max(0.4, (prevSameColorClockCentis - currentClockCentis) / 100.0)
             } else {
-                // Realistic pacing derived from position complexity
-                val legalCount = ChessEngine.generateLegalMoves(board).size
+                val pieceFactor = board.squares.size % 7
                 val baseSec = if (phase == GamePhase.OPENING) 2.1 else if (phase == GamePhase.MIDDLEGAME) 6.8 else 4.2
-                (baseSec + (legalCount % 7) * 0.8).coerceAtMost(28.0)
+                (baseSec + pieceFactor * 0.8).coerceAtMost(28.0)
             }
 
             val remainingSec = if (currentClockCentis != null) {

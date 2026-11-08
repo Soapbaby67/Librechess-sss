@@ -437,7 +437,10 @@ object ChessEngine {
         )
     }
 
-    fun generateLegalMoves(state: BoardState): List<ChessMove> {
+    /**
+     * Fast move generation without SAN string formatting — used inside search trees.
+     */
+    fun generateLegalMovesRaw(state: BoardState): List<ChessMove> {
         val rawMoves = mutableListOf<ChessMove>()
         for ((sq, piece) in state.squares) {
             if (piece.color == state.activeColor) {
@@ -449,29 +452,42 @@ object ChessEngine {
                 }
             }
         }
+        return rawMoves
+    }
+
+    private fun hasAnyLegalMove(state: BoardState): Boolean {
+        for ((sq, piece) in state.squares) {
+            if (piece.color == state.activeColor) {
+                for (m in generatePseudoMoves(state, sq)) {
+                    val after = applyMoveUnchecked(state, m)
+                    if (!isInCheck(after, state.activeColor)) {
+                        return true
+                    }
+                }
+            }
+        }
+        return false
+    }
+
+    fun generateLegalMoves(state: BoardState): List<ChessMove> {
+        val rawMoves = generateLegalMovesRaw(state)
         return rawMoves.map { move ->
             move.copy(san = formatSan(state, move, rawMoves))
         }
     }
 
     fun legalMovesFrom(state: BoardState, from: Square): List<ChessMove> {
-        return generateLegalMoves(state).filter { it.from == from }
+        val rawMoves = generateLegalMovesRaw(state)
+        return rawMoves.filter { it.from == from }.map { move ->
+            move.copy(san = formatSan(state, move, rawMoves))
+        }
     }
 
     private fun formatSan(state: BoardState, move: ChessMove, allLegal: List<ChessMove>): String {
         val after = applyMoveUnchecked(state, move)
-        val oppMoves = mutableListOf<ChessMove>()
-        for ((sq, piece) in after.squares) {
-            if (piece.color == after.activeColor) {
-                for (m in generatePseudoMoves(after, sq)) {
-                    val afterOpp = applyMoveUnchecked(after, m)
-                    if (!isInCheck(afterOpp, after.activeColor)) oppMoves.add(m)
-                }
-            }
-        }
         val inCheckAfter = isInCheck(after, after.activeColor)
         val suffix = when {
-            inCheckAfter && oppMoves.isEmpty() -> "#"
+            inCheckAfter && !hasAnyLegalMove(after) -> "#"
             inCheckAfter -> "+"
             else -> ""
         }
@@ -514,33 +530,36 @@ object ChessEngine {
     fun parseUciOrSanMove(state: BoardState, token: String): ChessMove? {
         val clean = token.trim().replace(Regex("[+#?!]+$"), "")
         if (clean.isEmpty()) return null
-        val legal = generateLegalMoves(state)
-        // First try UCI match (e.g., e2e4, e7e8q)
-        legal.firstOrNull { it.toUci().equals(clean, ignoreCase = true) }?.let { return it }
+        val rawLegal = generateLegalMovesRaw(state)
+        // First try UCI match (e.g., e2e4, e7e8q) without computing SAN for all moves
+        rawLegal.firstOrNull { it.toUci().equals(clean, ignoreCase = true) }?.let { matched ->
+            return matched.copy(san = formatSan(state, matched, rawLegal))
+        }
         // Handle Lichess castling UCI (e1h1 / e1a1)
         if (clean == "e1h1" || clean == "e8h8") {
-            legal.firstOrNull { it.isCastlingKingside }?.let { return it }
+            rawLegal.firstOrNull { it.isCastlingKingside }?.let { matched ->
+                return matched.copy(san = formatSan(state, matched, rawLegal))
+            }
         }
         if (clean == "e1a1" || clean == "e8a8") {
-            legal.firstOrNull { it.isCastlingQueenside }?.let { return it }
+            rawLegal.firstOrNull { it.isCastlingQueenside }?.let { matched ->
+                return matched.copy(san = formatSan(state, matched, rawLegal))
+            }
         }
         // Try SAN match
-        legal.firstOrNull {
-            it.san.replace(Regex("[+#?!]+$"), "").equals(clean, ignoreCase = false)
-        }?.let { return it }
+        for (candidate in rawLegal) {
+            val san = formatSan(state, candidate, rawLegal)
+            if (san.replace(Regex("[+#?!]+$"), "").equals(clean, ignoreCase = false)) {
+                return candidate.copy(san = san)
+            }
+        }
         return null
     }
 
     /**
-     * Evaluates position in centipawns from White's perspective (+100 = +1.00 pawn for White).
+     * Fast static evaluation in centipawns from White's perspective (+100 = +1.00 pawn for White).
      */
     fun evaluateCentipawns(state: BoardState): Int {
-        val legal = generateLegalMoves(state)
-        if (legal.isEmpty()) {
-            return if (isInCheck(state, state.activeColor)) {
-                if (state.activeColor == PieceColor.WHITE) -19000 else 19000
-            } else 0
-        }
         var score = 0
         for ((sq, piece) in state.squares) {
             val base = piece.type.centipawns
@@ -567,19 +586,23 @@ object ChessEngine {
      * Level 1..8 controls search depth and tactical sharpness.
      */
     fun findBestMove(state: BoardState, level: Int = 5): Pair<ChessMove?, Int> {
-        val legal = generateLegalMoves(state)
-        if (legal.isEmpty()) return null to evaluateCentipawns(state)
+        val rawLegal = generateLegalMovesRaw(state)
+        if (rawLegal.isEmpty()) {
+            val terminalEval = if (isInCheck(state, state.activeColor)) {
+                if (state.activeColor == PieceColor.WHITE) -19000 else 19000
+            } else 0
+            return null to terminalEval
+        }
 
         val depth = when {
-            level <= 2 -> 1
-            level <= 5 -> 2
-            else -> 3
+            level <= 3 -> 1
+            else -> 2
         }
         val maximizing = state.activeColor == PieceColor.WHITE
-        var bestMove: ChessMove = legal.first()
+        var bestMove: ChessMove = rawLegal.first()
         var bestEval = if (maximizing) Int.MIN_VALUE / 2 else Int.MAX_VALUE / 2
 
-        val ordered = legal.sortedByDescending {
+        val ordered = rawLegal.sortedByDescending {
             (if (it.isCapture) 500 else 0) + (it.promotion?.centipawns ?: 0)
         }
 
@@ -596,7 +619,8 @@ object ChessEngine {
                 bestMove = move
             }
         }
-        return bestMove to bestEval
+        val formattedBest = bestMove.copy(san = formatSan(state, bestMove, rawLegal))
+        return formattedBest to bestEval
     }
 
     private fun alphaBeta(
@@ -607,8 +631,12 @@ object ChessEngine {
         maximizing: Boolean
     ): Int {
         if (depth <= 0) return evaluateCentipawns(state)
-        val legal = generateLegalMoves(state)
-        if (legal.isEmpty()) return evaluateCentipawns(state)
+        val legal = generateLegalMovesRaw(state)
+        if (legal.isEmpty()) {
+            return if (isInCheck(state, state.activeColor)) {
+                if (state.activeColor == PieceColor.WHITE) -19000 else 19000
+            } else 0
+        }
 
         var alpha = alphaInit
         var beta = betaInit
