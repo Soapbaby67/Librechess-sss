@@ -1,0 +1,6 @@
+{
+  "name": "LibreChess Studio",
+  "description": "Полнофункциональный клиент Lichess с живой онлайн-игрой, турнирами, клубами, расширенной аналитикой Game Review и кастомными темами (OLED, Chess.com, авторские скины)",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

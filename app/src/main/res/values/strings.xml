@@ -1,0 +1,9 @@
+<resources>
+    <string name="app_name">LibreChess Studio</string>
+    <string name="nav_play">Играть</string>
+    <string name="nav_community">Турниры и Клубы</string>
+    <string name="nav_analytics">Аналитика</string>
+    <string name="nav_skins">Скины и Темы</string>
+    <string name="lichess_token_hint">Вставьте персональный токен Lichess (board:play, tournament:write, team:write)</string>
+    <string name="search_player_hint">Никнейм игрока на Lichess (например, DrNykterstein)</string>
+</resources>
