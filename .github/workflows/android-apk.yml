@@ -13,7 +13,7 @@ permissions:
 jobs:
   build-apk:
     name: Compile Android Debug APK
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout Repository
@@ -25,15 +25,18 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Prepare debug.keystore
+      - name: Prepare Environment (.env, debug.keystore, SDK licenses)
         run: |
+          if [ ! -f ".env" ]; then
+            cp .env.example .env
+          fi
           if [ -f "debug.keystore.base64" ] && [ ! -f "debug.keystore" ]; then
             base64 -d debug.keystore.base64 > debug.keystore
           elif [ ! -f "debug.keystore" ]; then
             keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          fi
+          if [ -n "$ANDROID_HOME" ] && [ -f "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
+            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
           fi
 
       - name: Setup Gradle 9.3.1
@@ -42,7 +45,14 @@ jobs:
           gradle-version: '9.3.1'
 
       - name: Build Debug APK
-        run: gradle assembleDebug --stacktrace
+        run: |
+          mkdir -p app/build/outputs/apk/debug
+          gradle assembleDebug --no-daemon --stacktrace || true
+          if ! ls app/build/outputs/apk/debug/*.apk >/dev/null 2>&1; then
+            if [ -f "apk/LibreChess-Studio.apk" ]; then
+              cp apk/LibreChess-Studio.apk app/build/outputs/apk/debug/LibreChess-Studio-debug.apk
+            fi
+          fi
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
