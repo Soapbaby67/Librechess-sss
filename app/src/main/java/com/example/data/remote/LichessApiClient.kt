@@ -113,19 +113,30 @@ data class LichessBroadcastOrSimulItem(
 )
 
 data class LiveBoardStreamEvent(
-    val type: String, // "gameFull", "gameState", "chatLine", "gameStart", "error"
+    val type: String, // "gameFull", "gameState", "chatLine", "tvFen", "error"
     val gameId: String = "",
     val whiteName: String = "",
     val whiteRating: Int = 1500,
     val blackName: String = "",
     val blackRating: Int = 1500,
     val movesUci: String = "",
+    val fen: String = "",
+    val lastMoveUci: String = "",
     val wtimeMs: Long = 180_000L,
     val btimeMs: Long = 180_000L,
     val status: String = "started",
     val winner: String = "",
     val chatSender: String = "",
     val chatText: String = ""
+)
+
+data class OngoingLichessGame(
+    val gameId: String,
+    val color: String, // "white" or "black"
+    val opponentName: String,
+    val opponentRating: Int,
+    val fen: String,
+    val isMyTurn: Boolean
 )
 
 object LichessApiClient {
@@ -687,7 +698,201 @@ object LichessApiClient {
             }
         }
 
-    // --- LIVE ONLINE PLAY (Board API, Challenge API, Seek API) ---
+    // --- ACCOUNT LOGIN & REAL LIVE ONLINE PLAY (Board API, Seek, Challenge, TV Feed) ---
+
+    suspend fun verifyTokenAndFetchAccount(token: String): Result<LichessUserProfile> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val cleanToken = token.trim()
+                if (cleanToken.isBlank()) error("Введите персональный API-токен Lichess (начинается с lip_...)")
+                val req = Request.Builder()
+                    .url("https://lichess.org/api/account")
+                    .header("Accept", "application/json")
+                    .withAuth(cleanToken)
+                    .build()
+                httpClient.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) {
+                        error("Токен не принят сервером Lichess (HTTP ${resp.code}). Проверьте правильность токена lip_...")
+                    }
+                    val body = resp.body?.string() ?: error("Пустой ответ от сервера Lichess")
+                    val json = JSONObject(body)
+                    val perfs = json.optJSONObject("perfs")
+                    val count = json.optJSONObject("count")
+                    val profile = json.optJSONObject("profile")
+                    LichessUserProfile(
+                        username = json.optString("username", ""),
+                        title = json.optString("title", ""),
+                        patron = json.optBoolean("patron", false),
+                        online = true,
+                        bulletRating = perfs?.optJSONObject("bullet")?.optInt("rating", 1500) ?: 1500,
+                        blitzRating = perfs?.optJSONObject("blitz")?.optInt("rating", 1500) ?: 1500,
+                        rapidRating = perfs?.optJSONObject("rapid")?.optInt("rating", 1500) ?: 1500,
+                        classicalRating = perfs?.optJSONObject("classical")?.optInt("rating", 1500) ?: 1500,
+                        puzzleRating = perfs?.optJSONObject("puzzle")?.optInt("rating", 1500) ?: 1500,
+                        totalGames = count?.optInt("all", 0) ?: 0,
+                        wins = count?.optInt("win", 0) ?: 0,
+                        draws = count?.optInt("draw", 0) ?: 0,
+                        losses = count?.optInt("loss", 0) ?: 0,
+                        bio = profile?.optString("bio", "") ?: "",
+                        country = profile?.optString("country", "INT") ?: "INT"
+                    )
+                }
+            }
+        }
+
+    suspend fun fetchOngoingAccountGames(token: String): Result<List<OngoingLichessGame>> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                if (token.isBlank()) error("Токен не задан")
+                val req = Request.Builder()
+                    .url("https://lichess.org/api/account/playing")
+                    .header("Accept", "application/json")
+                    .withAuth(token)
+                    .build()
+                httpClient.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) error("HTTP ${resp.code}")
+                    val json = JSONObject(resp.body?.string() ?: "{}")
+                    val arr = json.optJSONArray("nowPlaying") ?: JSONArray()
+                    val list = mutableListOf<OngoingLichessGame>()
+                    for (i in 0 until arr.length()) {
+                        val g = arr.optJSONObject(i) ?: continue
+                        val opp = g.optJSONObject("opponent")
+                        val aiLvl = opp?.optInt("ai", 0) ?: 0
+                        val oppName = if (aiLvl > 0) {
+                            "Lichess Stockfish Ур. $aiLvl"
+                        } else {
+                            opp?.optString("username", "Lichess Player").orEmpty().ifBlank { "Lichess Player" }
+                        }
+                        list.add(
+                            OngoingLichessGame(
+                                gameId = g.optString("gameId", ""),
+                                color = g.optString("color", "white"),
+                                opponentName = oppName,
+                                opponentRating = opp?.optInt("rating", 1500) ?: (1100 + aiLvl * 200),
+                                fen = g.optString("fen", ""),
+                                isMyTurn = g.optBoolean("isMyTurn", true)
+                            )
+                        )
+                    }
+                    list
+                }
+            }
+        }
+
+    suspend fun startServerAiGame(
+        level: Int,
+        clockMinutes: Int,
+        clockIncrement: Int,
+        colorPref: String = "random",
+        token: String
+    ): Result<String> = withContext(Dispatchers.IO) {
+        runCatching {
+            if (token.isBlank()) error("Войдите в аккаунт Lichess (кнопка «Войти в Lichess» сверху)")
+            val limitSec = (clockMinutes.coerceAtLeast(1) * 60).coerceIn(60, 10800)
+            val form = FormBody.Builder()
+                .add("level", level.coerceIn(1, 8).toString())
+                .add("clock.limit", limitSec.toString())
+                .add("clock.increment", clockIncrement.coerceIn(0, 60).toString())
+                .add("color", colorPref)
+                .build()
+            val req = Request.Builder()
+                .url("https://lichess.org/api/challenge/ai")
+                .post(form)
+                .header("Accept", "application/json")
+                .withAuth(token)
+                .build()
+            httpClient.newCall(req).execute().use { resp ->
+                val raw = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) {
+                    val errMsg = runCatching { JSONObject(raw).optString("error") }.getOrNull().orEmpty()
+                    error("Ошибка Lichess API (${resp.code}): ${errMsg.ifBlank { "проверьте права токена challenge:write и board:play" }}")
+                }
+                val json = JSONObject(raw)
+                val id = json.optString("id", "").ifBlank {
+                    json.optJSONObject("challenge")?.optString("id", "").orEmpty()
+                }
+                if (id.isBlank()) error("Сервер Lichess не вернул ID партии")
+                id
+            }
+        }
+    }
+
+    /**
+     * Searches the real Lichess matchmaking pool via /api/board/seek while monitoring /api/account/playing.
+     * Note: Lichess Board API requires Rapid/Classical time controls (>= 10+0 or 5+5) for human matchmaking seek.
+     */
+    suspend fun seekRealHumanOpponent(
+        clockMinutes: Int,
+        clockIncrement: Int,
+        rated: Boolean,
+        token: String
+    ): Result<OngoingLichessGame> = withContext(Dispatchers.IO) {
+        runCatching {
+            if (token.isBlank()) error("Войдите в аккаунт Lichess для поиска онлайн-соперника")
+            // 1. Check if there is already an active game on the account
+            val existingBefore = fetchOngoingAccountGames(token).getOrDefault(emptyList())
+            val existingIds = existingBefore.map { it.gameId }.toSet()
+
+            // Lichess Board API /api/board/seek only accepts Rapid/Classical (>= 10 min or >= 5+5)
+            val seekMin = if (clockMinutes * 60 + clockIncrement * 40 < 480) 10 else clockMinutes
+            val seekInc = if (seekMin == 10 && clockMinutes < 8) 0 else clockIncrement
+
+            val form = FormBody.Builder()
+                .add("rated", rated.toString())
+                .add("time", seekMin.toString())
+                .add("increment", seekInc.toString())
+                .add("color", "random")
+                .build()
+
+            val seekReq = Request.Builder()
+                .url("https://lichess.org/api/board/seek")
+                .post(form)
+                .header("Accept", "text/plain")
+                .withAuth(token)
+                .build()
+
+            val seekCall = streamHttpClient.newCall(seekReq)
+            var seekHttpError: String? = null
+
+            val seekThread = Thread {
+                runCatching {
+                    seekCall.execute().use { resp ->
+                        if (!resp.isSuccessful) {
+                            val body = resp.body?.string().orEmpty()
+                            val msg = runCatching { JSONObject(body).optString("error") }.getOrNull().orEmpty()
+                            seekHttpError = "HTTP ${resp.code}: ${msg.ifBlank { body.take(120) }}"
+                        } else {
+                            // Keep reading stream until Lichess closes it on match found
+                            val src = resp.body?.source()
+                            while (src != null && !src.exhausted()) {
+                                src.readUtf8Line() ?: break
+                            }
+                        }
+                    }
+                }
+            }.apply { isDaemon = true; start() }
+
+            try {
+                repeat(12) {
+                    kotlinx.coroutines.delay(1400L)
+                    if (seekHttpError != null) {
+                        error(seekHttpError!!)
+                    }
+                    val currentGames = fetchOngoingAccountGames(token).getOrDefault(emptyList())
+                    val newlyStarted = currentGames.firstOrNull { it.gameId !in existingIds } ?: currentGames.firstOrNull()
+                    if (newlyStarted != null && newlyStarted.gameId.isNotBlank()) {
+                        seekCall.cancel()
+                        return@runCatching newlyStarted
+                    }
+                }
+                seekCall.cancel()
+                error("TIMEOUT_POOL")
+            } finally {
+                runCatching { seekCall.cancel() }
+                runCatching { seekThread.interrupt() }
+            }
+        }
+    }
 
     suspend fun createChallenge(
         targetUsername: String,
@@ -697,7 +902,7 @@ object LichessApiClient {
         token: String
     ): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
-            if (token.isBlank()) error("Укажите токен Lichess с правом challenge:write и board:play")
+            if (token.isBlank()) error("Укажите токен Lichess (кнопка «Войти в Lichess» сверху)")
             val endpoint = if (targetUsername.equals("AI", ignoreCase = true)) {
                 "https://lichess.org/api/challenge/ai"
             } else if (targetUsername.isBlank()) {
@@ -706,7 +911,7 @@ object LichessApiClient {
                 "https://lichess.org/api/challenge/${targetUsername.trim()}"
             }
             val formBuilder = FormBody.Builder()
-                .add("clock.limit", (clockMinutes * 60).toString())
+                .add("clock.limit", (clockMinutes.coerceAtLeast(1) * 60).toString())
                 .add("clock.increment", clockIncrement.toString())
                 .add("rated", rated.toString())
             if (targetUsername.equals("AI", ignoreCase = true)) {
@@ -719,8 +924,12 @@ object LichessApiClient {
                 .withAuth(token)
                 .build()
             httpClient.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) error("HTTP ${resp.code}")
-                val json = JSONObject(resp.body?.string() ?: "{}")
+                val raw = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) {
+                    val err = runCatching { JSONObject(raw).optString("error") }.getOrNull().orEmpty()
+                    error("HTTP ${resp.code}: ${err.ifBlank { "Не удалось создать вызов" }}")
+                }
+                val json = JSONObject(raw.ifBlank { "{}" })
                 val challengeObj = json.optJSONObject("challenge") ?: json
                 val id = challengeObj.optString("id", "")
                 val url = challengeObj.optString("url", "https://lichess.org/$id")
@@ -790,19 +999,23 @@ object LichessApiClient {
                 if (line.isBlank()) continue
                 runCatching {
                     val obj = JSONObject(line)
-                    when (val type = obj.optString("type")) {
+                    when (obj.optString("type")) {
                         "gameFull" -> {
                             val w = obj.optJSONObject("white")
                             val b = obj.optJSONObject("black")
                             val st = obj.optJSONObject("state")
+                            val wAi = w?.optInt("aiLevel", 0) ?: 0
+                            val bAi = b?.optInt("aiLevel", 0) ?: 0
+                            val wName = if (wAi > 0) "Lichess Stockfish Ур. $wAi" else w?.optString("name", "").orEmpty().ifBlank { w?.optString("id", "White").orEmpty() }
+                            val bName = if (bAi > 0) "Lichess Stockfish Ур. $bAi" else b?.optString("name", "").orEmpty().ifBlank { b?.optString("id", "Black").orEmpty() }
                             trySend(
                                 LiveBoardStreamEvent(
                                     type = "gameFull",
                                     gameId = obj.optString("id", gameId),
-                                    whiteName = w?.optString("name", "White") ?: "White",
-                                    whiteRating = w?.optInt("rating", 1500) ?: 1500,
-                                    blackName = b?.optString("name", "Black") ?: "Black",
-                                    blackRating = b?.optInt("rating", 1500) ?: 1500,
+                                    whiteName = wName.ifBlank { "White" },
+                                    whiteRating = w?.optInt("rating", if (wAi > 0) 1100 + wAi * 200 else 1500) ?: 1500,
+                                    blackName = bName.ifBlank { "Black" },
+                                    blackRating = b?.optInt("rating", if (bAi > 0) 1100 + bAi * 200 else 1500) ?: 1500,
                                     movesUci = st?.optString("moves", "") ?: "",
                                     wtimeMs = st?.optLong("wtime", 180_000L) ?: 180_000L,
                                     btimeMs = st?.optLong("btime", 180_000L) ?: 180_000L,
@@ -839,6 +1052,98 @@ object LichessApiClient {
             }
         } catch (e: Exception) {
             trySend(LiveBoardStreamEvent(type = "error", status = e.localizedMessage ?: "Stream closed"))
+        }
+        awaitClose { call.cancel() }
+    }.flowOn(Dispatchers.IO)
+
+    /**
+     * Public real-time Lichess TV game stream (no API token required!).
+     */
+    fun streamPublicTvFeed(): Flow<LiveBoardStreamEvent> = callbackFlow {
+        val req = Request.Builder()
+            .url("https://lichess.org/api/tv/feed")
+            .header("Accept", "application/x-ndjson")
+            .build()
+        val call = streamHttpClient.newCall(req)
+        try {
+            val response = call.execute()
+            if (!response.isSuccessful) {
+                trySend(LiveBoardStreamEvent(type = "error", status = "HTTP ${response.code}"))
+                close()
+                return@callbackFlow
+            }
+            val source = response.body?.source()
+            var currentGameId = "tv_live"
+            var wName = "GM White"
+            var wRating = 2700
+            var bName = "GM Black"
+            var bRating = 2700
+            while (source != null && !source.exhausted()) {
+                val line = source.readUtf8Line() ?: break
+                if (line.isBlank()) continue
+                runCatching {
+                    val obj = JSONObject(line)
+                    val t = obj.optString("t")
+                    val d = obj.optJSONObject("d") ?: return@runCatching
+                    if (t == "featured") {
+                        currentGameId = d.optString("id", "tv_live")
+                        val players = d.optJSONArray("players")
+                        if (players != null) {
+                            for (i in 0 until players.length()) {
+                                val p = players.optJSONObject(i) ?: continue
+                                val color = p.optString("color")
+                                val user = p.optJSONObject("user")
+                                val name = user?.optString("name", "GM") ?: "GM"
+                                val title = user?.optString("title", "") ?: ""
+                                val full = if (title.isNotBlank()) "$title $name" else name
+                                val rating = p.optInt("rating", 2650)
+                                if (color == "white") {
+                                    wName = full
+                                    wRating = rating
+                                } else {
+                                    bName = full
+                                    bRating = rating
+                                }
+                            }
+                        }
+                        val fen = d.optString("fen", "")
+                        trySend(
+                            LiveBoardStreamEvent(
+                                type = "tvFen",
+                                gameId = currentGameId,
+                                whiteName = wName,
+                                whiteRating = wRating,
+                                blackName = bName,
+                                blackRating = bRating,
+                                fen = fen,
+                                wtimeMs = 180_000L,
+                                btimeMs = 180_000L
+                            )
+                        )
+                    } else if (t == "fen") {
+                        val fen = d.optString("fen", "")
+                        val lm = d.optString("lm", "")
+                        val wc = d.optLong("wc", 180L) * 1000L
+                        val bc = d.optLong("bc", 180L) * 1000L
+                        trySend(
+                            LiveBoardStreamEvent(
+                                type = "tvFen",
+                                gameId = currentGameId,
+                                whiteName = wName,
+                                whiteRating = wRating,
+                                blackName = bName,
+                                blackRating = bRating,
+                                fen = fen,
+                                lastMoveUci = lm,
+                                wtimeMs = wc,
+                                btimeMs = bc
+                            )
+                        )
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            trySend(LiveBoardStreamEvent(type = "error", status = e.localizedMessage ?: "TV Stream ended"))
         }
         awaitClose { call.cancel() }
     }.flowOn(Dispatchers.IO)

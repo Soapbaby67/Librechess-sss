@@ -23,6 +23,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
@@ -139,7 +140,6 @@ fun InteractiveChessBoardWithEval(
                             size = Size(sqSize, sqSize)
                         )
 
-                        // Skin procedural textures
                         if (boardSkin.hasWoodGrain) {
                             val grainColor = if (isLight) Color.Black.copy(alpha = 0.04f) else Color.Black.copy(alpha = 0.08f)
                             for (g in 1..3) {
@@ -240,18 +240,18 @@ fun InteractiveChessBoardWithEval(
                     }
                 }
 
-                // 2. Draw Pieces in selected PieceStyle
+                // 2. Draw Pieces in authentic Staunton / Lichess cburnett proportions
                 for (row in 0..7) {
                     for (col in 0..7) {
                         val file = if (flipped) 7 - col else col
                         val rank = if (flipped) row else 7 - row
                         val sq = Square(file, rank)
                         val piece = boardState.pieceAt(sq) ?: continue
-                        val center = Offset((col + 0.5f) * sqSize, (row + 0.5f) * sqSize)
-                        drawCustomStyledPiece(
+                        val topLeft = Offset(col * sqSize, row * sqSize)
+                        drawStauntonPiece(
                             piece = piece,
                             style = pieceStyle,
-                            center = center,
+                            topLeft = topLeft,
                             sqSize = sqSize
                         )
                     }
@@ -264,7 +264,7 @@ fun InteractiveChessBoardWithEval(
                     val center = Offset((col + 0.5f) * sqSize, (row + 0.5f) * sqSize)
                     if (move.isCapture) {
                         drawCircle(
-                            color = pieceStyle.accentGlow.copy(alpha = 0.78f),
+                            color = pieceStyle.accentGlow.copy(alpha = 0.82f),
                             radius = sqSize * 0.42f,
                             center = center,
                             style = Stroke(width = sqSize * 0.09f)
@@ -276,7 +276,7 @@ fun InteractiveChessBoardWithEval(
                             center = center
                         )
                         drawCircle(
-                            color = pieceStyle.accentGlow.copy(alpha = 0.85f),
+                            color = pieceStyle.accentGlow.copy(alpha = 0.88f),
                             radius = sqSize * 0.13f,
                             center = center
                         )
@@ -374,161 +374,376 @@ private fun DrawScope.drawMoveArrow(
     drawPath(path = path, color = color)
 }
 
-private fun DrawScope.drawCustomStyledPiece(
+/**
+ * Draws tournament-standard Staunton / Lichess cburnett chess pieces on a 45x45 virtual grid
+ * with high-contrast outlines and interior engraving lines so every piece is immediately recognizable.
+ */
+private fun DrawScope.drawStauntonPiece(
     piece: ChessPiece,
     style: PieceStyle,
-    center: Offset,
+    topLeft: Offset,
     sqSize: Float
 ) {
-    val fill = if (piece.color == PieceColor.WHITE) style.whiteFill else style.blackFill
-    val stroke = if (piece.color == PieceColor.WHITE) style.whiteStroke else style.blackStroke
-    val strokeWidth = if (style == PieceStyle.OLED_WIREFRAME) sqSize * 0.055f else sqSize * 0.042f
-    val r = sqSize * 0.36f
+    fun px(x45: Float): Float = topLeft.x + (x45 / 45f) * sqSize
+    fun py(y45: Float): Float = topLeft.y + (y45 / 45f) * sqSize
+    fun pr(r45: Float): Float = (r45 / 45f) * sqSize
 
-    // Subtle drop shadow
-    drawCircle(
-        color = Color.Black.copy(alpha = 0.28f),
-        radius = r * 0.92f,
-        center = Offset(center.x, center.y + sqSize * 0.06f)
-    )
+    val isWhite = piece.color == PieceColor.WHITE
+    val fill = if (isWhite) style.whiteFill else style.blackFill
+    val primaryStroke = if (isWhite) {
+        Color(0xFF141820)
+    } else {
+        if (style == PieceStyle.OLED_WIREFRAME || style == PieceStyle.IMPERIAL_GOLD) {
+            style.blackStroke
+        } else {
+            Color(0xFF0A0D12)
+        }
+    }
+    val innerDetailColor = if (isWhite) Color(0xFF1E293B) else Color(0xFFE2E8F0)
+    val outerContrastHalo = if (isWhite) Color.Black.copy(alpha = 0.25f) else Color.White.copy(alpha = 0.45f)
 
-    // Base pedestal for all pieces
-    drawRoundRect(
-        color = fill,
-        topLeft = Offset(center.x - r * 0.78f, center.y + r * 0.52f),
-        size = Size(r * 1.56f, r * 0.32f),
-        cornerRadius = CornerRadius(r * 0.15f, r * 0.15f)
-    )
-    drawRoundRect(
-        color = stroke,
-        topLeft = Offset(center.x - r * 0.78f, center.y + r * 0.52f),
-        size = Size(r * 1.56f, r * 0.32f),
-        cornerRadius = CornerRadius(r * 0.15f, r * 0.15f),
-        style = Stroke(width = strokeWidth)
+    val sw = pr(1.85f)
+    val haloSw = pr(3.2f)
+    val strokeStyle = Stroke(width = sw, cap = StrokeCap.Round, join = StrokeJoin.Round)
+    val haloStrokeStyle = Stroke(width = haloSw, cap = StrokeCap.Round, join = StrokeJoin.Round)
+    val detailStrokeStyle = Stroke(width = pr(1.35f), cap = StrokeCap.Round, join = StrokeJoin.Round)
+
+    fun drawShapeWithContour(path: Path) {
+        drawPath(path = path, color = outerContrastHalo, style = haloStrokeStyle)
+        drawPath(path = path, color = fill)
+        drawPath(path = path, color = primaryStroke, style = strokeStyle)
+    }
+
+    // Subtle ground shadow under pedestal
+    drawOval(
+        color = Color.Black.copy(alpha = 0.26f),
+        topLeft = Offset(px(8.5f), py(37.2f)),
+        size = Size(pr(28f), pr(4.2f))
     )
 
     when (piece.type) {
         PieceType.PAWN -> {
-            val body = Path().apply {
-                moveTo(center.x - r * 0.52f, center.y + r * 0.52f)
-                quadraticTo(center.x - r * 0.25f, center.y, center.x - r * 0.22f, center.y - r * 0.18f)
-                lineTo(center.x + r * 0.22f, center.y - r * 0.18f)
-                quadraticTo(center.x + r * 0.25f, center.y, center.x + r * 0.52f, center.y + r * 0.52f)
+            val pawnPath = Path().apply {
+                // Bottom pedestal + tapered stem
+                moveTo(px(10.0f), py(39.0f))
+                lineTo(px(35.0f), py(39.0f))
+                cubicTo(px(35.0f), py(35.2f), px(31.5f), py(33.5f), px(29.5f), py(32.0f))
+                cubicTo(px(26.5f), py(27.5f), px(25.5f), py(23.0f), px(25.5f), py(19.0f))
+                lineTo(px(28.2f), py(18.0f))
+                lineTo(px(28.2f), py(16.2f))
+                lineTo(px(16.8f), py(16.2f))
+                lineTo(px(16.8f), py(18.0f))
+                lineTo(px(19.5f), py(19.0f))
+                cubicTo(px(19.5f), py(23.0f), px(18.5f), py(27.5f), px(15.5f), py(32.0f))
+                cubicTo(px(13.5f), py(33.5f), px(10.0f), py(35.2f), px(10.0f), py(39.0f))
                 close()
             }
-            drawPath(body, color = fill)
-            drawPath(body, color = stroke, style = Stroke(width = strokeWidth))
-            drawCircle(color = fill, radius = r * 0.34f, center = Offset(center.x, center.y - r * 0.42f))
-            drawCircle(color = stroke, radius = r * 0.34f, center = Offset(center.x, center.y - r * 0.42f), style = Stroke(width = strokeWidth))
+            drawShapeWithContour(pawnPath)
+
+            // Round Staunton head
+            val headCenter = Offset(px(22.5f), py(11.3f))
+            drawCircle(color = outerContrastHalo, radius = pr(5.2f), center = headCenter, style = haloStrokeStyle)
+            drawCircle(color = fill, radius = pr(5.2f), center = headCenter)
+            drawCircle(color = primaryStroke, radius = pr(5.2f), center = headCenter, style = strokeStyle)
+
+            // Base & collar engravings
+            drawLine(
+                color = innerDetailColor,
+                start = Offset(px(13.0f), py(35.5f)),
+                end = Offset(px(32.0f), py(35.5f)),
+                strokeWidth = pr(1.25f),
+                cap = StrokeCap.Round
+            )
+            drawLine(
+                color = innerDetailColor,
+                start = Offset(px(15.5f), py(32.2f)),
+                end = Offset(px(29.5f), py(32.2f)),
+                strokeWidth = pr(1.2f),
+                cap = StrokeCap.Round
+            )
         }
+
         PieceType.ROOK -> {
-            val tower = Path().apply {
-                moveTo(center.x - r * 0.54f, center.y + r * 0.52f)
-                lineTo(center.x - r * 0.44f, center.y - r * 0.30f)
-                lineTo(center.x - r * 0.58f, center.y - r * 0.30f)
-                lineTo(center.x - r * 0.58f, center.y - r * 0.68f)
-                lineTo(center.x - r * 0.30f, center.y - r * 0.68f)
-                lineTo(center.x - r * 0.30f, center.y - r * 0.48f)
-                lineTo(center.x - r * 0.12f, center.y - r * 0.48f)
-                lineTo(center.x - r * 0.12f, center.y - r * 0.68f)
-                lineTo(center.x + r * 0.12f, center.y - r * 0.68f)
-                lineTo(center.x + r * 0.12f, center.y - r * 0.48f)
-                lineTo(center.x + r * 0.30f, center.y - r * 0.48f)
-                lineTo(center.x + r * 0.30f, center.y - r * 0.68f)
-                lineTo(center.x + r * 0.58f, center.y - r * 0.68f)
-                lineTo(center.x + r * 0.58f, center.y - r * 0.30f)
-                lineTo(center.x + r * 0.44f, center.y - r * 0.30f)
-                lineTo(center.x + r * 0.54f, center.y + r * 0.52f)
+            // Classic castle tower with 3 distinct battlements
+            val rookPath = Path().apply {
+                moveTo(px(9.0f), py(39.0f))
+                lineTo(px(36.0f), py(39.0f))
+                lineTo(px(35.0f), py(35.2f))
+                lineTo(px(32.0f), py(31.8f))
+                lineTo(px(31.0f), py(18.5f))
+                lineTo(px(34.2f), py(15.5f))
+                lineTo(px(34.2f), py(9.2f))
+                lineTo(px(29.5f), py(9.2f))
+                lineTo(px(29.5f), py(12.4f))
+                lineTo(px(25.2f), py(12.4f))
+                lineTo(px(25.2f), py(9.2f))
+                lineTo(px(19.8f), py(9.2f))
+                lineTo(px(19.8f), py(12.4f))
+                lineTo(px(15.5f), py(12.4f))
+                lineTo(px(15.5f), py(9.2f))
+                lineTo(px(10.8f), py(9.2f))
+                lineTo(px(10.8f), py(15.5f))
+                lineTo(px(14.0f), py(18.5f))
+                lineTo(px(13.0f), py(31.8f))
+                lineTo(px(10.0f), py(35.2f))
                 close()
             }
-            drawPath(tower, color = fill)
-            drawPath(tower, color = stroke, style = Stroke(width = strokeWidth))
+            drawShapeWithContour(rookPath)
+
+            // Horizontal masonry bands
+            for (yBand in listOf(15.5f, 18.5f, 31.8f, 35.2f)) {
+                val xMargin = when (yBand) {
+                    15.5f -> 12.2f
+                    18.5f -> 14.5f
+                    31.8f -> 13.5f
+                    else -> 11.2f
+                }
+                drawLine(
+                    color = innerDetailColor,
+                    start = Offset(px(xMargin), py(yBand)),
+                    end = Offset(px(45f - xMargin), py(yBand)),
+                    strokeWidth = pr(1.25f),
+                    cap = StrokeCap.Round
+                )
+            }
         }
+
         PieceType.KNIGHT -> {
-            val horse = Path().apply {
-                moveTo(center.x - r * 0.56f, center.y + r * 0.52f)
-                quadraticTo(center.x - r * 0.50f, center.y - r * 0.15f, center.x - r * 0.68f, center.y - r * 0.22f)
-                lineTo(center.x - r * 0.25f, center.y - r * 0.68f)
-                lineTo(center.x - r * 0.08f, center.y - r * 0.84f)
-                lineTo(center.x + r * 0.10f, center.y - r * 0.65f)
-                quadraticTo(center.x + r * 0.62f, center.y - r * 0.45f, center.x + r * 0.54f, center.y + r * 0.52f)
+            // Base pedestal
+            val basePath = Path().apply {
+                moveTo(px(9.5f), py(39.0f))
+                lineTo(px(35.5f), py(39.0f))
+                lineTo(px(34.0f), py(33.2f))
+                lineTo(px(11.0f), py(33.2f))
                 close()
             }
-            drawPath(horse, color = fill)
-            drawPath(horse, color = stroke, style = Stroke(width = strokeWidth))
+            drawShapeWithContour(basePath)
+
+            // Unmistakable Staunton Horse Head & Arched Neck
+            val horsePath = Path().apply {
+                moveTo(px(13.5f), py(33.2f))
+                // Front chest & throat curve up to jaw
+                cubicTo(px(13.8f), py(27.5f), px(17.5f), py(24.2f), px(20.2f), py(21.0f))
+                // Lower jaw & mouth notch
+                lineTo(px(15.2f), py(23.6f))
+                lineTo(px(13.5f), py(22.0f))
+                lineTo(px(16.5f), py(19.2f))
+                // Long muzzle / nose bridge extending left
+                lineTo(px(11.0f), py(21.0f))
+                cubicTo(px(8.2f), py(20.0f), px(8.2f), py(16.8f), px(10.8f), py(15.0f))
+                lineTo(px(17.0f), py(11.4f))
+                // Forelock & twin pointed horse ears
+                lineTo(px(16.2f), py(7.2f))
+                lineTo(px(19.8f), py(10.0f))
+                lineTo(px(22.5f), py(6.2f))
+                lineTo(px(25.2f), py(9.8f))
+                // Muscular arched neck & mane sweeping down right side
+                cubicTo(px(32.5f), py(11.5f), px(35.5f), py(20.0f), px(33.2f), py(33.2f))
+                close()
+            }
+            drawShapeWithContour(horsePath)
+
+            // Horse eye, nostril, and mane contour
             drawCircle(
-                color = stroke,
-                radius = r * 0.09f,
-                center = Offset(center.x - r * 0.20f, center.y - r * 0.42f)
+                color = innerDetailColor,
+                radius = pr(1.45f),
+                center = Offset(px(17.2f), py(13.8f))
+            )
+            drawCircle(
+                color = innerDetailColor,
+                radius = pr(1.0f),
+                center = Offset(px(11.2f), py(17.5f))
+            )
+            val maneLine = Path().apply {
+                moveTo(px(25.5f), py(12.2f))
+                cubicTo(px(30.2f), py(16.5f), px(31.2f), py(23.5f), px(29.8f), py(31.0f))
+            }
+            drawPath(maneLine, color = innerDetailColor, style = detailStrokeStyle)
+            drawLine(
+                color = innerDetailColor,
+                start = Offset(px(12.0f), py(36.0f)),
+                end = Offset(px(33.0f), py(36.0f)),
+                strokeWidth = pr(1.2f),
+                cap = StrokeCap.Round
             )
         }
+
         PieceType.BISHOP -> {
-            val mitre = Path().apply {
-                moveTo(center.x - r * 0.54f, center.y + r * 0.52f)
-                quadraticTo(center.x - r * 0.62f, center.y - r * 0.25f, center.x, center.y - r * 0.72f)
-                quadraticTo(center.x + r * 0.62f, center.y - r * 0.25f, center.x + r * 0.54f, center.y + r * 0.52f)
+            // Base with flared bishop ribbons
+            val basePath = Path().apply {
+                moveTo(px(9.0f), py(39.0f))
+                lineTo(px(36.0f), py(39.0f))
+                lineTo(px(34.2f), py(34.8f))
+                lineTo(px(31.0f), py(31.5f))
+                lineTo(px(14.0f), py(31.5f))
+                lineTo(px(10.8f), py(34.8f))
                 close()
             }
-            drawPath(mitre, color = fill)
-            drawPath(mitre, color = stroke, style = Stroke(width = strokeWidth))
-            drawCircle(color = fill, radius = r * 0.13f, center = Offset(center.x, center.y - r * 0.82f))
-            drawCircle(color = stroke, radius = r * 0.13f, center = Offset(center.x, center.y - r * 0.82f), style = Stroke(width = strokeWidth))
+            drawShapeWithContour(basePath)
+
+            // Pointed Mitre dome (distinctly taller/narrower than King, with diagonal mitre slash)
+            val mitrePath = Path().apply {
+                moveTo(px(14.5f), py(31.5f))
+                cubicTo(px(11.2f), py(24.0f), px(13.2f), py(14.2f), px(22.5f), py(10.2f))
+                cubicTo(px(31.8f), py(14.2f), px(33.8f), py(24.0f), px(30.5f), py(31.5f))
+                close()
+            }
+            drawShapeWithContour(mitrePath)
+
+            // Top finial orb (globus)
+            val orbCenter = Offset(px(22.5f), py(7.4f))
+            drawCircle(color = outerContrastHalo, radius = pr(2.4f), center = orbCenter, style = haloStrokeStyle)
+            drawCircle(color = fill, radius = pr(2.4f), center = orbCenter)
+            drawCircle(color = primaryStroke, radius = pr(2.4f), center = orbCenter, style = strokeStyle)
+
+            // Diagonal Bishop Mitre Slash (unmistakable vs King's cross) + collar bands
             drawLine(
-                color = stroke,
-                start = Offset(center.x - r * 0.18f, center.y - r * 0.22f),
-                end = Offset(center.x + r * 0.18f, center.y - r * 0.22f),
-                strokeWidth = strokeWidth
+                color = innerDetailColor,
+                start = Offset(px(18.0f), py(17.0f)),
+                end = Offset(px(27.0f), py(22.5f)),
+                strokeWidth = pr(1.8f),
+                cap = StrokeCap.Round
             )
             drawLine(
-                color = stroke,
-                start = Offset(center.x, center.y - r * 0.40f),
-                end = Offset(center.x, center.y - r * 0.04f),
-                strokeWidth = strokeWidth
+                color = innerDetailColor,
+                start = Offset(px(14.8f), py(28.5f)),
+                end = Offset(px(30.2f), py(28.5f)),
+                strokeWidth = pr(1.35f),
+                cap = StrokeCap.Round
+            )
+            drawLine(
+                color = innerDetailColor,
+                start = Offset(px(12.0f), py(35.2f)),
+                end = Offset(px(33.0f), py(35.2f)),
+                strokeWidth = pr(1.25f),
+                cap = StrokeCap.Round
             )
         }
+
         PieceType.QUEEN -> {
-            val crown = Path().apply {
-                moveTo(center.x - r * 0.60f, center.y + r * 0.52f)
-                lineTo(center.x - r * 0.78f, center.y - r * 0.52f)
-                lineTo(center.x - r * 0.36f, center.y - r * 0.12f)
-                lineTo(center.x, center.y - r * 0.68f)
-                lineTo(center.x + r * 0.36f, center.y - r * 0.12f)
-                lineTo(center.x + r * 0.78f, center.y - r * 0.52f)
-                lineTo(center.x + r * 0.60f, center.y + r * 0.52f)
+            // Base pedestal
+            val basePath = Path().apply {
+                moveTo(px(9.0f), py(39.0f))
+                lineTo(px(36.0f), py(39.0f))
+                lineTo(px(34.2f), py(34.5f))
+                lineTo(px(32.0f), py(30.8f))
+                lineTo(px(13.0f), py(30.8f))
+                lineTo(px(10.8f), py(34.5f))
                 close()
             }
-            drawPath(crown, color = fill)
-            drawPath(crown, color = stroke, style = Stroke(width = strokeWidth))
-            for (pt in listOf(
-                Offset(center.x - r * 0.78f, center.y - r * 0.58f),
-                Offset(center.x, center.y - r * 0.75f),
-                Offset(center.x + r * 0.78f, center.y - r * 0.58f)
-            )) {
-                drawCircle(color = style.accentGlow, radius = r * 0.11f, center = pt)
-                drawCircle(color = stroke, radius = r * 0.11f, center = pt, style = Stroke(width = strokeWidth * 0.8f))
-            }
-        }
-        PieceType.KING -> {
-            val robe = Path().apply {
-                moveTo(center.x - r * 0.58f, center.y + r * 0.52f)
-                quadraticTo(center.x - r * 0.70f, center.y - r * 0.35f, center.x, center.y - r * 0.48f)
-                quadraticTo(center.x + r * 0.70f, center.y - r * 0.35f, center.x + r * 0.58f, center.y + r * 0.52f)
+            drawShapeWithContour(basePath)
+
+            // 5-Spiked Royal Coronet
+            val coronetPath = Path().apply {
+                moveTo(px(13.0f), py(30.8f))
+                lineTo(px(8.2f), py(14.0f))   // Spike 1 (left)
+                lineTo(px(15.5f), py(23.2f))  // Valley 1
+                lineTo(px(15.2f), py(11.2f))  // Spike 2
+                lineTo(px(20.0f), py(22.2f))  // Valley 2
+                lineTo(px(22.5f), py(9.5f))   // Spike 3 (center)
+                lineTo(px(25.0f), py(22.2f))  // Valley 3
+                lineTo(px(29.8f), py(11.2f))  // Spike 4
+                lineTo(px(29.5f), py(23.2f))  // Valley 4
+                lineTo(px(36.8f), py(14.0f))  // Spike 5 (right)
+                lineTo(px(32.0f), py(30.8f))
                 close()
             }
-            drawPath(robe, color = fill)
-            drawPath(robe, color = stroke, style = Stroke(width = strokeWidth))
-            // Royal Cross
+            drawShapeWithContour(coronetPath)
+
+            // 5 Coronet Pearls on spike tips
+            val pearls = listOf(
+                Offset(px(8.2f), py(11.8f)),
+                Offset(px(15.2f), py(9.0f)),
+                Offset(px(22.5f), py(7.4f)),
+                Offset(px(29.8f), py(9.0f)),
+                Offset(px(36.8f), py(11.8f))
+            )
+            for (pt in pearls) {
+                drawCircle(color = outerContrastHalo, radius = pr(1.9f), center = pt, style = haloStrokeStyle)
+                drawCircle(color = fill, radius = pr(1.9f), center = pt)
+                drawCircle(color = primaryStroke, radius = pr(1.9f), center = pt, style = strokeStyle)
+            }
+
+            // Crown base bands & jewels
             drawLine(
-                color = stroke,
-                start = Offset(center.x, center.y - r * 0.92f),
-                end = Offset(center.x, center.y - r * 0.48f),
-                strokeWidth = strokeWidth * 1.25f
+                color = innerDetailColor,
+                start = Offset(px(13.5f), py(28.2f)),
+                end = Offset(px(31.5f), py(28.2f)),
+                strokeWidth = pr(1.35f),
+                cap = StrokeCap.Round
             )
             drawLine(
-                color = stroke,
-                start = Offset(center.x - r * 0.22f, center.y - r * 0.74f),
-                end = Offset(center.x + r * 0.22f, center.y - r * 0.74f),
-                strokeWidth = strokeWidth * 1.25f
+                color = innerDetailColor,
+                start = Offset(px(11.8f), py(34.8f)),
+                end = Offset(px(33.2f), py(34.8f)),
+                strokeWidth = pr(1.3f),
+                cap = StrokeCap.Round
+            )
+        }
+
+        PieceType.KING -> {
+            // Bold Imperial Cross on top (drawn as full contoured polygon so it is unmistakable)
+            val crossPath = Path().apply {
+                moveTo(px(20.8f), py(13.5f))
+                lineTo(px(20.8f), py(9.2f))
+                lineTo(px(17.2f), py(9.2f))
+                lineTo(px(17.2f), py(6.2f))
+                lineTo(px(20.8f), py(6.2f))
+                lineTo(px(20.8f), py(3.2f))
+                lineTo(px(24.2f), py(3.2f))
+                lineTo(px(24.2f), py(6.2f))
+                lineTo(px(27.8f), py(6.2f))
+                lineTo(px(27.8f), py(9.2f))
+                lineTo(px(24.2f), py(9.2f))
+                lineTo(px(24.2f), py(13.5f))
+                close()
+            }
+            drawShapeWithContour(crossPath)
+
+            // Base pedestal
+            val basePath = Path().apply {
+                moveTo(px(9.0f), py(39.0f))
+                lineTo(px(36.0f), py(39.0f))
+                lineTo(px(34.2f), py(34.5f))
+                lineTo(px(31.8f), py(30.8f))
+                lineTo(px(13.2f), py(30.8f))
+                lineTo(px(10.8f), py(34.5f))
+                close()
+            }
+            drawShapeWithContour(basePath)
+
+            // Double-Lobed Heart Royal Crown
+            val crownPath = Path().apply {
+                moveTo(px(13.2f), py(30.8f))
+                cubicTo(px(8.5f), py(22.0f), px(9.8f), py(13.2f), px(16.8f), py(13.2f))
+                cubicTo(px(19.8f), py(13.2f), px(21.6f), py(15.2f), px(22.5f), py(17.0f))
+                cubicTo(px(23.4f), py(15.2f), px(25.2f), py(13.2f), px(28.2f), py(13.2f))
+                cubicTo(px(35.2f), py(13.2f), px(36.5f), py(22.0f), px(31.8f), py(30.8f))
+                close()
+            }
+            drawShapeWithContour(crownPath)
+
+            // Interior royal crown arches & center pillar
+            drawLine(
+                color = innerDetailColor,
+                start = Offset(px(22.5f), py(17.0f)),
+                end = Offset(px(22.5f), py(28.0f)),
+                strokeWidth = pr(1.4f),
+                cap = StrokeCap.Round
+            )
+            drawLine(
+                color = innerDetailColor,
+                start = Offset(px(13.8f), py(28.2f)),
+                end = Offset(px(31.2f), py(28.2f)),
+                strokeWidth = pr(1.4f),
+                cap = StrokeCap.Round
+            )
+            drawLine(
+                color = innerDetailColor,
+                start = Offset(px(11.8f), py(34.8f)),
+                end = Offset(px(33.2f), py(34.8f)),
+                strokeWidth = pr(1.3f),
+                cap = StrokeCap.Round
             )
         }
     }

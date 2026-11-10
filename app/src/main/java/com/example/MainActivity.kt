@@ -226,6 +226,16 @@ fun LibreChessApp(
                         onSquareClick = chessViewModel::onArenaSquareClick,
                         onSelectTimeControl = chessViewModel::selectTimeControlAndStart,
                         onStartChallenge = chessViewModel::startOnlineChallengeOrSeek,
+                        onStartOnlineSeek = chessViewModel::startOnlineMatchmakingOrServerGame,
+                        onStartServerGame = { min, inc, _ ->
+                            chessViewModel.startServerHostedLichessGame(min, inc)
+                        },
+                        onStartTvStream = chessViewModel::startLiveTvStream,
+                        onConnectOngoingGame = { gameId ->
+                            chessViewModel.connectToLiveGameStream(gameId, preferences.lichessApiToken)
+                        },
+                        onSaveCredentials = chessViewModel::saveLichessCredentials,
+                        onLogoutAccount = chessViewModel::logoutLichessAccount,
                         onFlipBoard = chessViewModel::flipArenaBoard,
                         onRequestHint = chessViewModel::requestEngineHintOnArena,
                         onResignOrDraw = chessViewModel::resignOrDrawCurrentGame,
@@ -389,7 +399,7 @@ private fun DiagnosticLogDialog(
             ) {
                 Text("Журнал запуска и диагностики", style = MaterialTheme.typography.titleMedium)
                 Text(
-                    text = "v2.5",
+                    text = "v2.6",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.primary
                 )

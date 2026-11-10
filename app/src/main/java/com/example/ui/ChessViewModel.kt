@@ -74,6 +74,13 @@ data class ArenaUiState(
     val bestMoveHintUci: String? = null,
     val lastMoveClassification: MoveClassification? = null,
     val liveOnlineGameId: String? = null,
+    val myOnlineColor: PieceColor? = null,
+    val isSearchingOnline: Boolean = false,
+    val isTvLiveStream: Boolean = false,
+    val loggedInAccount: LichessUserProfile? = null,
+    val isVerifyingAccount: Boolean = false,
+    val authStatusMessage: String? = null,
+    val ongoingGames: List<com.example.data.remote.OngoingLichessGame> = emptyList(),
     val whitePlayerName: String = "Вы (LibreChess)",
     val whitePlayerRating: Int = 1850,
     val blackPlayerName: String = "Stockfish Ур. 5",
@@ -159,8 +166,23 @@ class ChessViewModel(application: Application) : AndroidViewModel(application) {
         com.example.util.AppDiagnosticLogger.ok("ViewModel", "ChessViewModel создан, запуск фоновой инициализации")
         viewModelScope.launch(Dispatchers.IO) {
             runCatching {
-                if (dao.getPreferencesOnce() == null) {
+                val savedPrefs = dao.getPreferencesOnce()
+                if (savedPrefs == null) {
                     dao.savePreferences(UserPreferencesEntity())
+                } else if (savedPrefs.lichessApiToken.isNotBlank()) {
+                    LichessApiClient.verifyTokenAndFetchAccount(savedPrefs.lichessApiToken).onSuccess { prof ->
+                        _arenaState.update {
+                            it.copy(
+                                loggedInAccount = prof,
+                                whitePlayerName = prof.username,
+                                whitePlayerRating = prof.blitzRating,
+                                authStatusMessage = "✓ Аккаунт @${prof.username} подключен"
+                            )
+                        }
+                    }
+                    LichessApiClient.fetchOngoingAccountGames(savedPrefs.lichessApiToken).onSuccess { games ->
+                        _arenaState.update { it.copy(ongoingGames = games) }
+                    }
                 }
                 seedInitialMasterpieceGamesIfEmpty()
                 com.example.util.AppDiagnosticLogger.ok("ViewModel", "Стартовые партии и настройки загружены")
@@ -168,8 +190,9 @@ class ChessViewModel(application: Application) : AndroidViewModel(application) {
                 com.example.util.AppDiagnosticLogger.error("ViewModel", "Ошибка при первичной инициализации данных", err)
             }
             runCatching {
+                val targetUser = dao.getPreferencesOnce()?.lichessUsername?.ifBlank { "DrNykterstein" } ?: "DrNykterstein"
                 refreshExplorerAndCloudEval(_arenaState.value.boardState.toFen())
-                loadLichessPlayerAndGames("DrNykterstein")
+                loadLichessPlayerAndGames(targetUser)
                 loadCommunityData()
                 com.example.util.AppDiagnosticLogger.ok("LichessAPI", "Фоновая синхронизация с Lichess API запущена")
             }.onFailure { err ->
@@ -218,10 +241,15 @@ class ChessViewModel(application: Application) : AndroidViewModel(application) {
         mode: PlayMode = _arenaState.value.playMode,
         aiLevel: Int = _arenaState.value.aiLevel
     ) {
+        liveStreamJob?.cancel()
         val prefs = preferencesFlow.value ?: UserPreferencesEntity()
-        val secs = (minutes * 60).coerceAtLeast(30)
+        val secs = (minutes * 60).coerceAtLeast(60)
+        val myName = _arenaState.value.loggedInAccount?.username
+            ?: prefs.lichessUsername.takeIf { it != "DrNykterstein" || prefs.lichessApiToken.isNotBlank() }
+            ?: "Вы"
+        val myRating = _arenaState.value.loggedInAccount?.blitzRating ?: 1850
         val oppName = when (mode) {
-            PlayMode.ONLINE_LICHESS -> "Lichess Pool ($label)"
+            PlayMode.ONLINE_LICHESS -> "Поиск соперника Lichess..."
             PlayMode.VS_STOCKFISH -> "Stockfish Ур. $aiLevel"
             PlayMode.TWO_PLAYER -> "Игрок 2 (Черные)"
             PlayMode.FREE_ANALYSIS -> "Режим Анализа"
@@ -241,25 +269,203 @@ class ChessViewModel(application: Application) : AndroidViewModel(application) {
                 whiteClockSeconds = secs,
                 blackClockSeconds = secs,
                 isGameActive = true,
+                liveOnlineGameId = null,
+                myOnlineColor = null,
+                isSearchingOnline = false,
+                isTvLiveStream = false,
                 evalCentipawns = 20,
                 bestMoveHintUci = null,
                 lastMoveClassification = null,
-                whitePlayerName = prefs.lichessUsername.ifBlank { "Вы" },
+                whitePlayerName = myName,
+                whitePlayerRating = myRating,
                 blackPlayerName = oppName,
                 blackPlayerRating = if (mode == PlayMode.VS_STOCKFISH) 1100 + aiLevel * 210 else 1900,
-                statusBanner = "Новая партия ($label) • Ваш ход"
+                statusBanner = if (mode == PlayMode.ONLINE_LICHESS) {
+                    "Онлайн Lichess ($label) • Подключение..."
+                } else {
+                    "Новая партия ($label) • Ваш ход"
+                }
             )
         }
         refreshExplorerAndCloudEval(BoardState.INITIAL_FEN)
+
+        if (mode == PlayMode.ONLINE_LICHESS) {
+            startOnlineMatchmakingOrServerGame(minutes, increment)
+        }
+    }
+
+    /**
+     * Real online matchmaking on Lichess.org:
+     * - If logged in with a Lichess token: checks active games -> searches human pool (/api/board/seek) -> or starts real Lichess server game (/api/challenge/ai).
+     * - If no token yet: connects to real live Lichess TV stream (/api/tv/feed) and prompts user to log in for rated play.
+     */
+    fun startOnlineMatchmakingOrServerGame(minutes: Int = _arenaState.value.initialSeconds / 60, increment: Int = _arenaState.value.incrementSeconds) {
+        val prefs = preferencesFlow.value ?: UserPreferencesEntity()
+        val token = prefs.lichessApiToken.trim()
+        if (token.isBlank()) {
+            com.example.util.AppDiagnosticLogger.warn("OnlinePlay", "Токен Lichess не задан — запуск живого стрима Lichess TV")
+            startLiveTvStream(
+                customBanner = "Войдите в аккаунт Lichess сверху для игры в пуле • Сейчас: Прямой эфир Lichess TV"
+            )
+            return
+        }
+
+        liveStreamJob?.cancel()
+        liveStreamJob = viewModelScope.launch(Dispatchers.IO) {
+            _arenaState.update {
+                it.copy(
+                    playMode = PlayMode.ONLINE_LICHESS,
+                    isSearchingOnline = true,
+                    isTvLiveStream = false,
+                    statusBanner = "🔍 Поиск соперника на сервере Lichess.org ($minutes+$increment)..."
+                )
+            }
+            com.example.util.AppDiagnosticLogger.info("OnlinePlay", "Запуск поиска партии на Lichess ($minutes+$increment)")
+
+            // 1. Check if the user already has an ongoing game on Lichess
+            val ongoing = LichessApiClient.fetchOngoingAccountGames(token).getOrDefault(emptyList())
+            _arenaState.update { it.copy(ongoingGames = ongoing) }
+            if (ongoing.isNotEmpty()) {
+                val active = ongoing.first()
+                com.example.util.AppDiagnosticLogger.ok("OnlinePlay", "Найдена активная партия на Lichess: #${active.gameId}")
+                connectToLiveGameStream(active.gameId, token, initialColorHint = active.color)
+                return@launch
+            }
+
+            // 2. Search human matchmaking pool via /api/board/seek
+            val seekRes = LichessApiClient.seekRealHumanOpponent(
+                clockMinutes = minutes.coerceAtLeast(1),
+                clockIncrement = increment,
+                rated = true,
+                token = token
+            )
+            seekRes.onSuccess { matchedGame ->
+                com.example.util.AppDiagnosticLogger.ok("OnlinePlay", "Найден соперник в пуле Lichess: #${matchedGame.gameId}")
+                connectToLiveGameStream(matchedGame.gameId, token, initialColorHint = matchedGame.color)
+            }.onFailure { seekErr ->
+                com.example.util.AppDiagnosticLogger.info(
+                    "OnlinePlay",
+                    "Пул людей не ответил мгновенно (${seekErr.message}) — запуск серверной партии Lichess"
+                )
+                // 3. Immediately start a real server-hosted game on Lichess.org so online play works 100% of the time
+                startServerHostedLichessGame(minutes, increment)
+            }
+        }
+    }
+
+    fun startServerHostedLichessGame(
+        minutes: Int = (_arenaState.value.initialSeconds / 60).coerceAtLeast(1),
+        increment: Int = _arenaState.value.incrementSeconds
+    ) {
+        val prefs = preferencesFlow.value ?: UserPreferencesEntity()
+        val token = prefs.lichessApiToken.trim()
+        if (token.isBlank()) {
+            _arenaState.update {
+                it.copy(
+                    isSearchingOnline = false,
+                    statusBanner = "Сначала нажмите «Войти в Lichess» сверху и добавьте токен lip_..."
+                )
+            }
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            _arenaState.update {
+                it.copy(
+                    playMode = PlayMode.ONLINE_LICHESS,
+                    isSearchingOnline = true,
+                    isTvLiveStream = false,
+                    statusBanner = "Создание живой партии на сервере Lichess.org ($minutes+$increment)..."
+                )
+            }
+            val res = LichessApiClient.startServerAiGame(
+                level = _arenaState.value.aiLevel,
+                clockMinutes = minutes,
+                clockIncrement = increment,
+                token = token
+            )
+            res.onSuccess { gameId ->
+                com.example.util.AppDiagnosticLogger.ok("OnlinePlay", "Серверная партия Lichess создана: #$gameId")
+                connectToLiveGameStream(gameId, token)
+            }.onFailure { err ->
+                com.example.util.AppDiagnosticLogger.error("OnlinePlay", "Ошибка старта серверной партии Lichess", err)
+                _arenaState.update {
+                    it.copy(
+                        isSearchingOnline = false,
+                        statusBanner = err.localizedMessage ?: "Ошибка подключения к серверу Lichess"
+                    )
+                }
+            }
+        }
+    }
+
+    fun startLiveTvStream(customBanner: String? = null) {
+        liveStreamJob?.cancel()
+        liveStreamJob = viewModelScope.launch(Dispatchers.IO) {
+            _arenaState.update {
+                it.copy(
+                    playMode = PlayMode.ONLINE_LICHESS,
+                    isSearchingOnline = false,
+                    isTvLiveStream = true,
+                    liveOnlineGameId = "tv_live",
+                    myOnlineColor = null,
+                    statusBanner = customBanner ?: "📡 Прямой эфир Lichess TV • Подключение к серверу..."
+                )
+            }
+            LichessApiClient.streamPublicTvFeed().collect { ev ->
+                if (ev.type == "tvFen" && ev.fen.isNotBlank()) {
+                    val b = BoardState.fromFen(ev.fen)
+                    val lastSqMove = if (ev.lastMoveUci.length >= 4) {
+                        val f = Square.fromAlgebraic(ev.lastMoveUci.substring(0, 2))
+                        val t = Square.fromAlgebraic(ev.lastMoveUci.substring(2, 4))
+                        if (f != null && t != null) ChessMove(f, t, san = ev.lastMoveUci) else null
+                    } else null
+                    val boardWithHighlight = if (lastSqMove != null) b.copy(lastMove = lastSqMove) else b
+                    val evalCp = ChessEngine.evaluateCentipawns(boardWithHighlight)
+                    _arenaState.update {
+                        it.copy(
+                            boardState = boardWithHighlight,
+                            whitePlayerName = ev.whiteName.ifBlank { it.whitePlayerName },
+                            whitePlayerRating = ev.whiteRating,
+                            blackPlayerName = ev.blackName.ifBlank { it.blackPlayerName },
+                            blackPlayerRating = ev.blackRating,
+                            whiteClockSeconds = (ev.wtimeMs / 1000L).toInt(),
+                            blackClockSeconds = (ev.btimeMs / 1000L).toInt(),
+                            evalCentipawns = evalCp,
+                            isSearchingOnline = false,
+                            isTvLiveStream = true,
+                            statusBanner = customBanner ?: "📡 Lichess TV Live: ${ev.whiteName} vs ${ev.blackName}"
+                        )
+                    }
+                }
+            }
+        }
     }
 
     fun startOnlineChallengeOrSeek(targetUsername: String, minutes: Int, increment: Int, rated: Boolean) {
         val prefs = preferencesFlow.value ?: UserPreferencesEntity()
-        viewModelScope.launch {
+        val token = prefs.lichessApiToken.trim()
+        if (token.isBlank()) {
+            _arenaState.update {
+                it.copy(
+                    statusBanner = "Для отправки вызова войдите в аккаунт Lichess (кнопка «Войти в Lichess» сверху)"
+                )
+            }
+            return
+        }
+        if (targetUsername.isBlank()) {
+            startOnlineMatchmakingOrServerGame(minutes, increment)
+            return
+        }
+        if (targetUsername.equals("AI", ignoreCase = true)) {
+            startServerHostedLichessGame(minutes, increment)
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
             _arenaState.update {
                 it.copy(
                     playMode = PlayMode.ONLINE_LICHESS,
-                    statusBanner = "Подключение к серверу Lichess (${targetUsername.ifBlank { "Открытый пул" }})..."
+                    isSearchingOnline = true,
+                    statusBanner = "Отправка вызова игроку @${targetUsername.trim()} на Lichess.org..."
                 )
             }
             val res = LichessApiClient.createChallenge(
@@ -267,38 +473,50 @@ class ChessViewModel(application: Application) : AndroidViewModel(application) {
                 clockMinutes = minutes,
                 clockIncrement = increment,
                 rated = rated,
-                token = prefs.lichessApiToken
+                token = token
             )
             res.onSuccess { gameOrChallengeId ->
                 _arenaState.update {
                     it.copy(
                         liveOnlineGameId = gameOrChallengeId,
-                        blackPlayerName = targetUsername.ifBlank { "Lichess Opponent" },
-                        statusBanner = "Вызов отправлен на Lichess (#$gameOrChallengeId) • Поток подключен"
+                        isSearchingOnline = false,
+                        blackPlayerName = targetUsername.trim(),
+                        statusBanner = "Вызов отправлен @${targetUsername.trim()} (#$gameOrChallengeId) • Ожидание принятия..."
                     )
                 }
-                connectToLiveGameStream(gameOrChallengeId, prefs.lichessApiToken)
+                connectToLiveGameStream(gameOrChallengeId, token)
             }.onFailure { err ->
-                // Start responsive live match while showing helpful Lichess API message
-                selectTimeControlAndStart(
-                    label = "$minutes+$increment • Онлайн",
-                    minutes = minutes,
-                    increment = increment,
-                    mode = PlayMode.ONLINE_LICHESS
-                )
                 _arenaState.update {
                     it.copy(
-                        blackPlayerName = targetUsername.ifBlank { "Lichess_Rapid_Player" },
-                        statusBanner = err.localizedMessage ?: "Для прямого вызова укажите токен Lichess во вкладке «Скины и Темы»"
+                        isSearchingOnline = false,
+                        statusBanner = err.localizedMessage ?: "Не удалось отправить вызов"
                     )
                 }
             }
         }
     }
 
-    private fun connectToLiveGameStream(gameId: String, token: String) {
+    fun connectToLiveGameStream(gameId: String, token: String, initialColorHint: String? = null) {
         liveStreamJob?.cancel()
-        liveStreamJob = viewModelScope.launch {
+        val myUsername = (_arenaState.value.loggedInAccount?.username ?: preferencesFlow.value?.lichessUsername.orEmpty()).trim()
+        liveStreamJob = viewModelScope.launch(Dispatchers.IO) {
+            val hintColor = when (initialColorHint?.lowercase()) {
+                "black" -> PieceColor.BLACK
+                "white" -> PieceColor.WHITE
+                else -> null
+            }
+            _arenaState.update {
+                it.copy(
+                    playMode = PlayMode.ONLINE_LICHESS,
+                    liveOnlineGameId = gameId,
+                    myOnlineColor = hintColor ?: it.myOnlineColor,
+                    flipped = if (hintColor == PieceColor.BLACK) true else it.flipped,
+                    isSearchingOnline = false,
+                    isTvLiveStream = false,
+                    isGameActive = true,
+                    statusBanner = "🟢 Онлайн Lichess #$gameId • Подключено к потоку партии"
+                )
+            }
             LichessApiClient.streamBoardGame(gameId, token).collect { ev ->
                 when (ev.type) {
                     "gameFull", "gameState" -> {
@@ -310,16 +528,41 @@ class ChessViewModel(application: Application) : AndroidViewModel(application) {
                             sanList.add(m.san)
                             b = ChessEngine.applyMoveUnchecked(b, m)
                         }
-                        _arenaState.update {
-                            it.copy(
+                        val evalCp = ChessEngine.evaluateCentipawns(b)
+                        _arenaState.update { prev ->
+                            val resolvedWName = ev.whiteName.ifBlank { prev.whitePlayerName }
+                            val resolvedBName = ev.blackName.ifBlank { prev.blackPlayerName }
+                            val detectedMyColor = when {
+                                myUsername.isNotBlank() && resolvedBName.equals(myUsername, ignoreCase = true) -> PieceColor.BLACK
+                                myUsername.isNotBlank() && resolvedWName.equals(myUsername, ignoreCase = true) -> PieceColor.WHITE
+                                prev.myOnlineColor != null -> prev.myOnlineColor
+                                resolvedBName.contains("Stockfish", ignoreCase = true) -> PieceColor.WHITE
+                                resolvedWName.contains("Stockfish", ignoreCase = true) -> PieceColor.BLACK
+                                else -> PieceColor.WHITE
+                            }
+                            val finished = ev.status !in listOf("started", "created", "")
+                            val turnStr = if (b.activeColor == detectedMyColor) "Ваш ход!" else "Ожидание хода соперника..."
+                            val banner = if (finished) {
+                                "Онлайн-партия #$gameId завершена (${ev.status})"
+                            } else {
+                                "🟢 Онлайн #$gameId • $turnStr"
+                            }
+                            prev.copy(
                                 boardState = b,
                                 moveHistorySan = sanList,
                                 moveHistoryUci = uciTokens,
                                 whiteClockSeconds = (ev.wtimeMs / 1000L).toInt(),
                                 blackClockSeconds = (ev.btimeMs / 1000L).toInt(),
-                                whitePlayerName = ev.whiteName.ifBlank { it.whitePlayerName },
-                                blackPlayerName = ev.blackName.ifBlank { it.blackPlayerName },
-                                statusBanner = "Онлайн Lichess #$gameId • Ход ${if (b.activeColor == PieceColor.WHITE) "белых" else "черных"}"
+                                whitePlayerName = resolvedWName,
+                                whitePlayerRating = if (ev.type == "gameFull") ev.whiteRating else prev.whitePlayerRating,
+                                blackPlayerName = resolvedBName,
+                                blackPlayerRating = if (ev.type == "gameFull") ev.blackRating else prev.blackPlayerRating,
+                                myOnlineColor = detectedMyColor,
+                                flipped = if (ev.type == "gameFull") (detectedMyColor == PieceColor.BLACK) else prev.flipped,
+                                evalCentipawns = evalCp,
+                                isGameActive = !finished,
+                                isSearchingOnline = false,
+                                statusBanner = banner
                             )
                         }
                     }
@@ -330,6 +573,9 @@ class ChessViewModel(application: Application) : AndroidViewModel(application) {
                             }
                         }
                     }
+                    "error" -> {
+                        com.example.util.AppDiagnosticLogger.warn("OnlineStream", "Поток партии #$gameId: ${ev.status}")
+                    }
                 }
             }
         }
@@ -337,7 +583,37 @@ class ChessViewModel(application: Application) : AndroidViewModel(application) {
 
     fun onArenaSquareClick(square: Square) {
         val current = _arenaState.value
+        if (current.isTvLiveStream) {
+            _arenaState.update {
+                it.copy(statusBanner = "Вы смотрите прямой эфир Lichess TV. Нажмите «Играть онлайн» или «Против Stockfish», чтобы делать ходы.")
+            }
+            return
+        }
         if (!current.isGameActive && current.playMode != PlayMode.FREE_ANALYSIS) return
+
+        // In live online Lichess mode, verify an online game is active and it is the user's turn
+        if (current.playMode == PlayMode.ONLINE_LICHESS) {
+            if (current.liveOnlineGameId == null) {
+                val hasToken = preferencesFlow.value?.lichessApiToken?.isNotBlank() == true
+                _arenaState.update {
+                    it.copy(
+                        statusBanner = if (hasToken) {
+                            "Нажмите «Найти соперника» или «Серверная игра Lichess» на онлайн-панели выше"
+                        } else {
+                            "🔑 Нажмите «Войти в Lichess» сверху для онлайн-игры, либо выберите «Против Stockfish»"
+                        }
+                    )
+                }
+                return
+            }
+            if (current.myOnlineColor != null && current.boardState.activeColor != current.myOnlineColor) {
+                _arenaState.update {
+                    it.copy(statusBanner = "Сейчас ход соперника на сервере Lichess...")
+                }
+                return
+            }
+        }
+
         val selected = current.selectedSquare
         val moveCandidate = current.legalMovesForSelected.firstOrNull {
             it.to == square && (it.promotion == null || it.promotion == com.example.chess.PieceType.QUEEN)
@@ -431,7 +707,12 @@ class ChessViewModel(application: Application) : AndroidViewModel(application) {
         val token = preferencesFlow.value?.lichessApiToken.orEmpty()
         if (liveId != null && token.isNotBlank()) {
             viewModelScope.launch {
-                LichessApiClient.sendBoardMove(liveId, move.toUci(), token)
+                val ok = LichessApiClient.sendBoardMove(liveId, move.toUci(), token).getOrDefault(false)
+                if (!ok) {
+                    _arenaState.update {
+                        it.copy(statusBanner = "⚠ Сервер Lichess отклонил ход ${move.san} (проверьте очередь хода или контроль)")
+                    }
+                }
             }
         }
 
@@ -442,9 +723,8 @@ class ChessViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
-        // Trigger AI reply if playing vs Stockfish or simulated online match without active stream
-        val shouldAiReply = (prev.playMode == PlayMode.VS_STOCKFISH ||
-            (prev.playMode == PlayMode.ONLINE_LICHESS && prev.liveOnlineGameId == null)) &&
+        // Trigger local AI reply ONLY when playing offline vs Stockfish
+        val shouldAiReply = prev.playMode == PlayMode.VS_STOCKFISH &&
             nextBoard.activeColor == PieceColor.BLACK
 
         if (shouldAiReply) {
@@ -1037,15 +1317,106 @@ class ChessViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun saveLichessCredentials(username: String, apiToken: String) {
+        val cleanToken = apiToken.trim()
+        val cleanUser = username.trim()
         val current = preferencesFlow.value ?: UserPreferencesEntity()
-        viewModelScope.launch {
+        _arenaState.update {
+            it.copy(
+                isVerifyingAccount = true,
+                authStatusMessage = "Проверка аккаунта на сервере Lichess.org..."
+            )
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            if (cleanToken.isNotBlank()) {
+                val verifyRes = LichessApiClient.verifyTokenAndFetchAccount(cleanToken)
+                verifyRes.onSuccess { profile ->
+                    dao.savePreferences(
+                        current.copy(
+                            lichessUsername = profile.username,
+                            lichessApiToken = cleanToken
+                        )
+                    )
+                    val activeGames = LichessApiClient.fetchOngoingAccountGames(cleanToken).getOrDefault(emptyList())
+                    _arenaState.update {
+                        it.copy(
+                            loggedInAccount = profile,
+                            isVerifyingAccount = false,
+                            ongoingGames = activeGames,
+                            whitePlayerName = profile.username,
+                            whitePlayerRating = profile.blitzRating,
+                            authStatusMessage = "✓ Вы вошли как @${profile.username} (Blitz: ${profile.blitzRating}, Rapid: ${profile.rapidRating})",
+                            statusBanner = "Аккаунт @${profile.username} подключен • Готов к онлайн-игре!"
+                        )
+                    }
+                    com.example.util.AppDiagnosticLogger.ok("Auth", "Успешный вход в Lichess как @${profile.username}")
+                    loadLichessPlayerAndGames(profile.username)
+                }.onFailure { err ->
+                    _arenaState.update {
+                        it.copy(
+                            isVerifyingAccount = false,
+                            authStatusMessage = "❌ ${err.localizedMessage ?: "Ошибка проверки токена"}"
+                        )
+                    }
+                    com.example.util.AppDiagnosticLogger.error("Auth", "Ошибка проверки токена Lichess", err)
+                }
+            } else if (cleanUser.isNotBlank()) {
+                val profRes = LichessApiClient.fetchUserProfile(cleanUser)
+                profRes.onSuccess { profile ->
+                    dao.savePreferences(
+                        current.copy(
+                            lichessUsername = profile.username,
+                            lichessApiToken = ""
+                        )
+                    )
+                    _arenaState.update {
+                        it.copy(
+                            loggedInAccount = profile,
+                            isVerifyingAccount = false,
+                            whitePlayerName = profile.username,
+                            whitePlayerRating = profile.blitzRating,
+                            authStatusMessage = "Профиль @${profile.username} загружен (режим просмотра). Для игры онлайн создайте токен lip_..."
+                        )
+                    }
+                    loadLichessPlayerAndGames(profile.username)
+                }.onFailure {
+                    _arenaState.update {
+                        it.copy(
+                            isVerifyingAccount = false,
+                            authStatusMessage = "Игрок @$cleanUser не найден на Lichess.org"
+                        )
+                    }
+                }
+            } else {
+                _arenaState.update {
+                    it.copy(
+                        isVerifyingAccount = false,
+                        authStatusMessage = "Введите токен Lichess (lip_...) или ваш никнейм"
+                    )
+                }
+            }
+        }
+    }
+
+    fun logoutLichessAccount() {
+        val current = preferencesFlow.value ?: UserPreferencesEntity()
+        liveStreamJob?.cancel()
+        viewModelScope.launch(Dispatchers.IO) {
             dao.savePreferences(
                 current.copy(
-                    lichessUsername = username.trim().ifEmpty { "DrNykterstein" },
-                    lichessApiToken = apiToken.trim()
+                    lichessUsername = "DrNykterstein",
+                    lichessApiToken = ""
                 )
             )
-            loadLichessPlayerAndGames(username.trim().ifEmpty { "DrNykterstein" })
+            _arenaState.update {
+                it.copy(
+                    loggedInAccount = null,
+                    liveOnlineGameId = null,
+                    myOnlineColor = null,
+                    ongoingGames = emptyList(),
+                    whitePlayerName = "Вы",
+                    authStatusMessage = "Вы вышли из аккаунта Lichess"
+                )
+            }
         }
     }
 

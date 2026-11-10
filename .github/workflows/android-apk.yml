@@ -1,4 +1,4 @@
-name: Build LibreChess Studio v2.5 APK
+name: Build LibreChess Studio v2.6 APK
 
 on:
   push:
@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   build-apk:
-    name: Compile Android Debug APK (v2.5 + Logs)
+    name: Compile Android Debug APK (v2.6)
     runs-on: ubuntu-24.04
 
     steps:
@@ -47,13 +47,13 @@ jobs:
       - name: Build Debug APK
         run: |
           gradle assembleDebug --no-daemon -Djava.awt.headless=true --stacktrace
-          cp app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/debug/LibreChess-Studio-v2.5.apk
+          cp app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/debug/LibreChess-Studio-v2.6.apk
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: LibreChess-Studio-v2.5-APK
-          path: app/build/outputs/apk/debug/LibreChess-Studio-v2.5.apk
+          name: LibreChess-Studio-v2.6-APK
+          path: app/build/outputs/apk/debug/LibreChess-Studio-v2.6.apk
           if-no-files-found: error
 
       - name: Publish APK to GitHub Releases
@@ -61,7 +61,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release delete v2.5-latest --yes --cleanup-tag || true
-          gh release create v2.5-latest app/build/outputs/apk/debug/LibreChess-Studio-v2.5.apk \
-            --title "LibreChess Studio v2.5 (With Diagnostic Logs)" \
-            --notes "Версия 2.5 с встроенным экраном логов запуска и отказоустойчивой инициализацией."
+          gh release delete v2.6-latest --yes --cleanup-tag || true
+          gh release create v2.6-latest app/build/outputs/apk/debug/LibreChess-Studio-v2.6.apk \
+            --title "LibreChess Studio v2.6 (Classic Staunton Pieces + Lichess Login & Online)" \
+            --notes "Версия 2.6: классические шахматные фигуры Staunton / cburnett, вход в аккаунт Lichess в 1 клик и рабочий онлайн-режим."

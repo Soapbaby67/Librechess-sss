@@ -1,5 +1,7 @@
 package com.example.ui.screens
 
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -19,20 +21,28 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
+import androidx.compose.material.icons.automirrored.filled.Login
+import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.CloudSync
 import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.Handshake
+import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Lightbulb
+import androidx.compose.material.icons.filled.LiveTv
 import androidx.compose.material.icons.filled.MenuBook
+import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.People
 import androidx.compose.material.icons.filled.PersonAdd
+import androidx.compose.material.icons.filled.PersonSearch
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.SwapVert
@@ -41,6 +51,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -63,9 +74,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -88,6 +102,12 @@ fun PlayArenaScreen(
     onSquareClick: (com.example.chess.Square) -> Unit,
     onSelectTimeControl: (String, Int, Int, PlayMode, Int) -> Unit,
     onStartChallenge: (String, Int, Int, Boolean) -> Unit,
+    onStartOnlineSeek: (Int, Int) -> Unit,
+    onStartServerGame: (Int, Int, Int) -> Unit,
+    onStartTvStream: () -> Unit,
+    onConnectOngoingGame: (String) -> Unit,
+    onSaveCredentials: (String, String) -> Unit,
+    onLogoutAccount: () -> Unit,
     onFlipBoard: () -> Unit,
     onRequestHint: () -> Unit,
     onResignOrDraw: (Boolean) -> Unit,
@@ -95,6 +115,7 @@ fun PlayArenaScreen(
     onCycleQuickTheme: (AppUiTheme) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     val activeUiTheme = AppUiTheme.fromId(preferences.appUiThemeId)
     val boardSkin = BoardSkin.fromId(preferences.boardSkinId)
     val pieceStyle = PieceStyle.fromId(preferences.pieceStyleId)
@@ -102,6 +123,11 @@ fun PlayArenaScreen(
     var showLobbyDialog by remember { mutableStateOf(false) }
     var showChallengeFriendDialog by remember { mutableStateOf(false) }
     var showChatDialog by remember { mutableStateOf(false) }
+    var showAccountDialog by remember { mutableStateOf(false) }
+
+    val isLoggedIn = arenaState.loggedInAccount != null || preferences.lichessApiToken.isNotBlank()
+    val displayUsername = arenaState.loggedInAccount?.username
+        ?: preferences.lichessUsername.ifBlank { "Аккаунт" }
 
     LazyColumn(
         modifier = modifier
@@ -111,7 +137,7 @@ fun PlayArenaScreen(
         contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        // 1. Compact Grandmaster Hero & Quick Pairing Header
+        // 1. Compact Grandmaster Hero & Quick Pairing + Account Login Header
         item {
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -125,18 +151,18 @@ fun PlayArenaScreen(
                         contentScale = ContentScale.Crop,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(104.dp)
+                            .height(114.dp)
                     )
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(104.dp)
+                            .height(114.dp)
                             .background(
                                 Brush.horizontalGradient(
                                     colors = listOf(
-                                        activeUiTheme.background.copy(alpha = 0.92f),
-                                        activeUiTheme.background.copy(alpha = 0.68f),
-                                        activeUiTheme.background.copy(alpha = 0.88f)
+                                        activeUiTheme.background.copy(alpha = 0.94f),
+                                        activeUiTheme.background.copy(alpha = 0.74f),
+                                        activeUiTheme.background.copy(alpha = 0.92f)
                                     )
                                 )
                             )
@@ -151,20 +177,21 @@ fun PlayArenaScreen(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Column {
+                                Column(modifier = Modifier.weight(1f)) {
                                     Text(
-                                        text = "LIBRECHESS STUDIO • LICHESS FORK",
+                                        text = "LIBRECHESS STUDIO • LICHESS.ORG",
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.primary
                                     )
                                     Text(
                                         text = arenaState.statusBanner,
-                                        style = MaterialTheme.typography.titleMedium,
+                                        style = MaterialTheme.typography.titleSmall,
                                         color = MaterialTheme.colorScheme.onSurface,
-                                        maxLines = 1,
+                                        maxLines = 2,
                                         overflow = TextOverflow.Ellipsis
                                     )
                                 }
+                                Spacer(Modifier.width(8.dp))
                                 Surface(
                                     shape = RoundedCornerShape(20.dp),
                                     color = MaterialTheme.colorScheme.primary.copy(alpha = 0.18f),
@@ -190,20 +217,49 @@ fun PlayArenaScreen(
                             }
 
                             Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
+                                // Prominent Account Login / Profile Button
+                                Button(
+                                    onClick = { showAccountDialog = true },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = if (isLoggedIn) Color(0xFF16A34A) else MaterialTheme.colorScheme.primary,
+                                        contentColor = if (isLoggedIn) Color.White else MaterialTheme.colorScheme.onPrimary
+                                    ),
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                    modifier = Modifier
+                                        .height(34.dp)
+                                        .testTag("lichess_account_login_button")
+                                ) {
+                                    Icon(
+                                        imageVector = if (isLoggedIn) Icons.Default.CheckCircle else Icons.AutoMirrored.Filled.Login,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(Modifier.width(5.dp))
+                                    Text(
+                                        text = if (isLoggedIn) "@$displayUsername" else "Войти в Lichess",
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+
                                 Button(
                                     onClick = { showLobbyDialog = true },
-                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                    contentPadding = PaddingValues(horizontal = 11.dp, vertical = 4.dp),
                                     modifier = Modifier
                                         .height(34.dp)
                                         .testTag("open_quick_pairing_button")
                                 ) {
-                                    Icon(Icons.Default.Bolt, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Icon(Icons.Default.Bolt, contentDescription = null, modifier = Modifier.size(15.dp))
                                     Spacer(Modifier.width(4.dp))
-                                    Text("Быстрый пул Lichess", fontSize = 12.sp)
+                                    Text("Быстрый пул", fontSize = 12.sp)
                                 }
+
                                 OutlinedButton(
                                     onClick = { showChallengeFriendDialog = true },
                                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
@@ -222,7 +278,7 @@ fun PlayArenaScreen(
             }
         }
 
-        // 2. Mode & Quick Time Control Selector Strip
+        // 2. Mode Selector Strip
         item {
             Row(
                 modifier = Modifier
@@ -253,6 +309,200 @@ fun PlayArenaScreen(
                             Icon(icon, contentDescription = null, modifier = Modifier.size(16.dp))
                         }
                     )
+                }
+            }
+        }
+
+        // 2b. Dedicated Online Lichess Control Panel (shown when ONLINE_LICHESS or Live Stream is active)
+        if (arenaState.playMode == PlayMode.ONLINE_LICHESS || arenaState.liveOnlineGameId != null || arenaState.isTvLiveStream) {
+            item {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(
+                            width = 1.dp,
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f),
+                            shape = RoundedCornerShape(14.dp)
+                        ),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surface
+                    )
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                if (arenaState.isSearchingOnline) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(14.dp),
+                                        strokeWidth = 2.dp,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = if (arenaState.isTvLiveStream) Icons.Default.LiveTv else Icons.Default.CloudSync,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                                Text(
+                                    text = when {
+                                        arenaState.liveOnlineGameId != null ->
+                                            "ОНЛАЙН-ПАРТИЯ LICHESS #${arenaState.liveOnlineGameId}"
+                                        arenaState.isTvLiveStream ->
+                                            "ПРЯМОЙ ЭФИР LICHESS TV LIVE"
+                                        else ->
+                                            "ОНЛАЙН-ЦЕНТР LICHESS.ORG"
+                                    },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+
+                            TextButton(
+                                onClick = { showAccountDialog = true },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                                modifier = Modifier.height(26.dp)
+                            ) {
+                                Text(
+                                    text = if (isLoggedIn) "Аккаунт: @$displayUsername" else "🔑 Войти в аккаунт",
+                                    fontSize = 11.sp
+                                )
+                            }
+                        }
+
+                        if (!isLoggedIn) {
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { showAccountDialog = true }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(
+                                        text = "Для игры онлайн от своего имени войдите в Lichess (токен создаётся в 1 клик). Без входа доступен Lichess TV Live!",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    Spacer(Modifier.width(8.dp))
+                                    Button(
+                                        onClick = { showAccountDialog = true },
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                        modifier = Modifier.height(32.dp)
+                                    ) {
+                                        Text("Войти", fontSize = 12.sp)
+                                    }
+                                }
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Button(
+                                onClick = {
+                                    if (!isLoggedIn) {
+                                        showAccountDialog = true
+                                    } else {
+                                        onStartOnlineSeek(
+                                            (arenaState.initialSeconds / 60).coerceAtLeast(1),
+                                            arenaState.incrementSeconds
+                                        )
+                                    }
+                                },
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                modifier = Modifier
+                                    .height(34.dp)
+                                    .testTag("online_seek_opponent_button")
+                            ) {
+                                Icon(Icons.Default.PersonSearch, contentDescription = null, modifier = Modifier.size(15.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("Найти соперника", fontSize = 12.sp)
+                            }
+
+                            OutlinedButton(
+                                onClick = {
+                                    if (!isLoggedIn) {
+                                        showAccountDialog = true
+                                    } else {
+                                        onStartServerGame(
+                                            (arenaState.initialSeconds / 60).coerceAtLeast(1),
+                                            arenaState.incrementSeconds,
+                                            arenaState.aiLevel
+                                        )
+                                    }
+                                },
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                modifier = Modifier
+                                    .height(34.dp)
+                                    .testTag("online_server_ai_button")
+                            ) {
+                                Icon(Icons.Default.SmartToy, contentDescription = null, modifier = Modifier.size(15.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("Серверная игра Lichess", fontSize = 12.sp)
+                            }
+
+                            OutlinedButton(
+                                onClick = onStartTvStream,
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                modifier = Modifier
+                                    .height(34.dp)
+                                    .testTag("online_tv_stream_button")
+                            ) {
+                                Icon(Icons.Default.LiveTv, contentDescription = null, modifier = Modifier.size(15.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("Lichess TV Live", fontSize = 12.sp)
+                            }
+                        }
+
+                        if (arenaState.ongoingGames.isNotEmpty()) {
+                            Text(
+                                text = "Ваши активные партии на сервере Lichess:",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                arenaState.ongoingGames.forEach { g ->
+                                    FilterChip(
+                                        selected = arenaState.liveOnlineGameId == g.gameId,
+                                        onClick = { onConnectOngoingGame(g.gameId) },
+                                        label = {
+                                            Text(
+                                                "vs ${g.opponentName} (${g.opponentRating}) • ${if (g.isMyTurn) "Ваш ход" else "Ход соперника"}",
+                                                fontSize = 11.sp
+                                            )
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -485,6 +735,164 @@ fun PlayArenaScreen(
         }
     }
 
+    // Lichess Account Login & Token Verification Modal
+    if (showAccountDialog) {
+        var usernameInput by remember(preferences.lichessUsername) {
+            mutableStateOf(preferences.lichessUsername)
+        }
+        var tokenInput by remember(preferences.lichessApiToken) {
+            mutableStateOf(preferences.lichessApiToken)
+        }
+        var showRawToken by remember { mutableStateOf(false) }
+
+        AlertDialog(
+            onDismissRequest = { showAccountDialog = false },
+            title = {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        Icons.Default.AccountCircle,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Text("Вход в аккаунт Lichess.org")
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    val account = arenaState.loggedInAccount
+                    if (account != null) {
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = Color(0xFF16A34A).copy(alpha = 0.16f),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .border(1.dp, Color(0xFF2ECC71), RoundedCornerShape(10.dp))
+                        ) {
+                            Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text(
+                                    text = "✅ Авторизован: @${account.username}",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = Color(0xFF2ECC71),
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "Bullet ${account.bulletRating} • Blitz ${account.blitzRating} • Rapid ${account.rapidRating} • Classical ${account.classicalRating}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        }
+                    }
+
+                    if (!arenaState.authStatusMessage.isNullOrBlank()) {
+                        Text(
+                            text = arenaState.authStatusMessage,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+
+                    Text(
+                        text = "1. Нажмите кнопку ниже, чтобы открыть Lichess.org с уже выбранными правами (Board Play, Challenges, Tournaments) и скопируйте созданный токен (lip_...):",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    Button(
+                        onClick = {
+                            val tokenUrl = "https://lichess.org/account/oauth/token/create" +
+                                "?scopes[]=board:play" +
+                                "&scopes[]=challenge:read" +
+                                "&scopes[]=challenge:write" +
+                                "&scopes[]=tournament:write" +
+                                "&scopes[]=team:write" +
+                                "&description=LibreChess+Studio+Android"
+                            runCatching {
+                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(tokenUrl)))
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Default.OpenInNew, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("🔑 Получить токен на Lichess.org в 1 клик", fontSize = 12.sp)
+                    }
+
+                    OutlinedTextField(
+                        value = tokenInput,
+                        onValueChange = { tokenInput = it },
+                        label = { Text("Персональный токен Lichess (lip_...)") },
+                        leadingIcon = { Icon(Icons.Default.Key, contentDescription = null) },
+                        trailingIcon = {
+                            TextButton(onClick = { showRawToken = !showRawToken }) {
+                                Text(if (showRawToken) "Скрыть" else "Показать", fontSize = 11.sp)
+                            }
+                        },
+                        visualTransformation = if (showRawToken) VisualTransformation.None else PasswordVisualTransformation(),
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("dialog_lichess_token_input")
+                    )
+
+                    OutlinedTextField(
+                        value = usernameInput,
+                        onValueChange = { usernameInput = it },
+                        label = { Text("Никнейм на Lichess (определится автоматически)") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("dialog_lichess_username_input")
+                    )
+
+                    if (arenaState.isVerifyingAccount) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                            Text("Проверка токена на сервере Lichess.org...", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onSaveCredentials(usernameInput, tokenInput)
+                    },
+                    modifier = Modifier.testTag("dialog_verify_login_button")
+                ) {
+                    Icon(Icons.AutoMirrored.Filled.Login, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Войти и проверить")
+                }
+            },
+            dismissButton = {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (isLoggedIn) {
+                        TextButton(
+                            onClick = {
+                                onLogoutAccount()
+                                tokenInput = ""
+                            }
+                        ) {
+                            Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = null, modifier = Modifier.size(15.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Выйти", color = Color(0xFFFA412D))
+                        }
+                    }
+                    TextButton(onClick = { showAccountDialog = false }) {
+                        Text("Закрыть")
+                    }
+                }
+            }
+        )
+    }
+
     // Quick Pairing Grid Modal (1+0, 2+1, 3+0, 3+2, 5+0, 5+3, 10+0, 10+5, 15+10, 30+0 + AI Level)
     if (showLobbyDialog) {
         var selectedAiLevel by remember { mutableIntStateOf(arenaState.aiLevel) }
@@ -560,7 +968,7 @@ fun PlayArenaScreen(
                     OutlinedTextField(
                         value = opponentUsername,
                         onValueChange = { opponentUsername = it },
-                        label = { Text("Никнейм на Lichess (пусто = открытый вызов)") },
+                        label = { Text("Никнейм на Lichess (пусто = поиск в пуле)") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
